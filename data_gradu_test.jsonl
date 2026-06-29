@@ -1,0 +1,150 @@
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_212859_642386.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_212913_259544.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_212927_211626.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_212939_052500.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_212950_837585.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213005_640934.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213032_003790.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213117_070719.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213131_709043.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213146_172283.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213158_222788.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213213_405224.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213224_998237.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213237_207190.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214024_374045.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214048_042438.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214102_250059.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_214116_747207.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_214135_820035.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214148_447523.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214210_709934.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214221_971673.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214259_222779.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214313_782253.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214335_741625.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214351_621233.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_214405_561934.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_214416_886301.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_214432_258616.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214443_490933.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214459_316905.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_214508_971049.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213245_780516.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213328_114044.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213344_234000.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213357_083713.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213408_372000.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213427_105684.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213445_437122.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213505_925090.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213530_938687.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213608_959393.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213636_367497.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260418_213652_586350.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213710_221713.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup stawberry"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_stawberry_20260418_213731_923270.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213754_153530.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213816_682155.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213832_425955.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213903_208337.png", "instruction": "prepare the fruits", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213922_120007.png", "instruction": "prepare the fruits", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_213935_855319.png", "instruction": "prepare the fruits", "annotation": {"action_label": "prepare the fruits finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260418_223738_209668.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260418_223750_524769.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260418_223802_206571.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260418_223815_648793.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_223825_981364.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_223838_449919.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_223846_606013.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260419_201752_148310.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260419_201805_064126.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_201822_540642.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_201837_408147.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_201912_536262.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_201930_543657.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_201939_374435.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260418_224805_079644.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260418_224829_009615.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260418_224842_226288.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "put eraser in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_203834_560797.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_203847_045533.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_203854_548203.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "put eraser in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_000317_419826.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_000351_347232.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_000404_805569.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "put eraser in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260419_000450_812877.png", "instruction": "put eraser in the tray", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_204314_091663.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_204329_481739.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000818_293746.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000835_914374.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000846_434680.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "put lemon in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_203753_238524.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_203806_309450.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_203820_042850.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_203827_516825.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "put lemon in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_234920_415033.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_234941_681128.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_235001_059388.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "put lemon in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_235355_914588.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_235413_504000.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260418_235427_985285.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "put lemon in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000132_510112.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "pickup lemon"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000156_759171.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_lemon_20260419_000210_168305.png", "instruction": "put lemon in the tray", "annotation": {"action_label": "put lemon in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235202_805214.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235221_592395.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235235_142843.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235437_395808.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235500_369045.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260418_235513_991345.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000224_601414.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000248_524433.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000303_067236.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000738_384233.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000756_028148.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_000807_786543.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204001_586931.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204013_369464.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204020_819584.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204238_523844.png", "instruction": "put cube in the tray", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204252_917464.png", "instruction": "put cube in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260419_204301_571858.png", "instruction": "put cube in the tray", "annotation": {"action_label": "put cube in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000044_169956.png", "instruction": "put orange in the tray", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000108_188996.png", "instruction": "put orange in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000119_704932.png", "instruction": "put orange in the tray", "annotation": {"action_label": "put orange in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000544_109819.png", "instruction": "put orange in the tray", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000626_110914.png", "instruction": "put orange in the tray", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000649_498635.png", "instruction": "put orange in the tray", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000711_246952.png", "instruction": "put orange in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_000720_682280.png", "instruction": "put orange in the tray", "annotation": {"action_label": "put orange in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_203928_482903.png", "instruction": "put orange in the tray", "annotation": {"action_label": "pickup orange"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_203944_864584.png", "instruction": "put orange in the tray", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_orange_20260419_203954_190930.png", "instruction": "put orange in the tray", "annotation": {"action_label": "put orange in the tray finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163324_410464.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163453_880152.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163518_608578.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_163537_162224.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_163602_453279.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_163625_560989.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_163652_097817.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_163710_551789.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163823_623130.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163846_889714.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_163905_049153.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_163920_455111.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_163939_858264.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_163958_013496.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164022_120792.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164040_545627.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_164150_735820.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_164226_496435.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_164251_575128.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup bottle"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_bottle_20260422_164313_007200.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_164348_048306.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup eraser"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_eraser_20260422_164408_348781.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164427_045132.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164507_056891.png", "instruction": "tidy up the properties", "annotation": {"action_label": "pickup cube"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164528_372510.png", "instruction": "tidy up the properties", "annotation": {"action_label": "putdown"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164542_374634.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
+{"image_path": "/home/skyler/Desktop/isaac_python/captured_images/capture_cube_20260422_164549_913559.png", "instruction": "tidy up the properties", "annotation": {"action_label": "tidy up the properties finished"}}
