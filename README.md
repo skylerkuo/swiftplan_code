@@ -20,7 +20,7 @@
 
 ## 假如想執行看看
 
-1. 先下載https://huggingface.co/datasets/Kuoskyler/swiftplan-isaac-sim這個資料集，要注意格式和路徑問題
-2. 下載https://huggingface.co/google/siglip2-base-patch16-512
+1. 先下載 https://huggingface.co/datasets/Kuoskyler/swiftplan-isaac-sim 這個資料集，要注意格式和路徑問題
+2. 下載 https://huggingface.co/google/siglip2-base-patch16-512
 3. 執行 embedding_text_image.py
 4. 執行 swiftplan_train.py，會訓練模型並對模型在測試資料上測試
