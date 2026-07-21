@@ -20,7 +20,16 @@
 
 ## 假如想執行看看
 
+# 第一階段自監督微調視覺編碼器
+
 1. 先下載 https://huggingface.co/datasets/Kuoskyler/swiftplan-isaac-sim 這個資料集，要注意格式和路徑問題
+
 2. 下載 https://huggingface.co/google/siglip2-base-patch16-512
-3. 執行 embedding_text_image.py
-4. 執行 swiftplan_train.py，會訓練模型並對模型在測試資料上測試
+
+3. 改 byol.py 中的 IMAGE_DIR，要指向一個資料夾內有任務的所有影像，不須標註，執行後模型就會自動訓練，訓練完會給一個資料夾，裡面有模型權重
+
+# 第二階段監督式對比學習
+
+1. 把 embedding_text_image.py 中的 model-name 的 default="google/siglip2-base-patch16-512" 路徑改成第一階段模型權重，並執行。
+
+2. 把 swiftplan_train.py MODEL_NAME 也改成和上一步一樣，並執行，會訓練模型並對模型在測試資料上測試
