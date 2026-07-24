@@ -1,32 +1,38 @@
 # ============================================================
-# BYOL Finetune SigLIP2 Vision Encoder from Images (PATCH-TOKEN LEVEL)
-# - Load images directly from a folder (recursively)
-# - Two views of the SAME image: clean + augmented
+# BYOL Finetune SigLIP2 Vision Encoder from Multiple Video Folders
+# PATCH-TOKEN LEVEL
+#
+# - Sample random frames from videos under multiple folders
+# - Supports AGIBOT + Mobile ALOHA joint BYOL training
+# - Each dataset folder is split into train/val separately
+# - Optional source-balanced sampling across datasets
+# - Two views of the SAME frame: clean + augmented
 # - Teacher ALWAYS sees CLEAN
 # - Student ALWAYS sees AUG
-# - Use Vision LAST_HIDDEN_STATE (patch tokens) directly (B, N, D)
-# - Token-level BYOL: projector/predictor operate on each token (B, N, *)
-# - NO random resized crop (no zoom/crop/resize) in augmentation (PIL aug only)
+# - Use Vision LAST_HIDDEN_STATE patch tokens directly: (B, N, D)
+# - Token-level BYOL: projector/predictor operate on each token
+# - NO random resized crop in augmentation
 # - BYOL online/target networks with EMA teacher
-# - Save finetuned model in HuggingFace format (every epoch)
+# - Save finetuned model in HuggingFace format every epoch
 # ============================================================
 
 import os
 import random
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import av
+import cv2
 import numpy as np
 import torch
+from PIL import Image, ImageEnhance, ImageFilter
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-
-from PIL import Image, ImageEnhance, ImageFilter
+from torch.utils.data import Dataset, DataLoader, get_worker_info
 from tqdm import tqdm
-
 from transformers import AutoModel, AutoProcessor
 
 
@@ -35,57 +41,57 @@ from transformers import AutoModel, AutoProcessor
 # =========================
 @dataclass
 class CFG:
-    EXPERIMENT_NAME: str = "BYOL_SIGLIP2_PATCHTOKENS_TOKENLEVEL"
+    EXPERIMENT_NAME: str = "BYOL_SIGLIP2_PATCHTOKENS_JOINT_AGIBOT_MOBILEALOHA"
 
-    IMAGE_DIR: str = "/home/skyler/Desktop/isaac_python/captured_images"   # ← point to your image folder
-    OUTPUT_DIR: str = "./byol_siglip2_images_ckpt"
+    # Put your two dataset folders here.
+    # The script recursively finds mp4 / avi / mov / mkv files under each folder.
+    VIDEO_DIRS: List[str] = field(default_factory=lambda: [
+        "/home/skyler/Desktop/graduation_real_robot_v2/AgiBotWorldChallenge-2025/byol_video",
+        "/home/skyler/Desktop/graduation_real_robot/real_robot_data",
+    ])
+
+    OUTPUT_DIR: str = "./byol_siglip2_agibot_mobilealoha_joint"
     MODEL_NAME: str = "google/siglip2-base-patch16-512"
 
-    # image extensions to search for
-    IMAGE_EXTS: tuple = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    # Split each folder separately.
+    VAL_RATIO: float = 0.1
 
-    # sampling
-    SAMPLES_PER_EPOCH: int = 630
-    VAL_SAMPLES: int = 70
+    # If True, each dataset source is sampled approximately equally.
+    # If False, videos are sampled uniformly from the merged video list.
+    SOURCE_BALANCED: bool = True
 
-    # train
-    EPOCHS: int = 10
+    # Sampling
+    SAMPLES_PER_EPOCH: int = 10000
+    VAL_SAMPLES: int = 500
+    MIN_FRAMES: int = 30
+
+    # Training
+    EPOCHS: int = 15
     BATCH_SIZE: int = 4
-    GRAD_ACCUM: int = 8          # effective batch = BATCH_SIZE * GRAD_ACCUM
+    GRAD_ACCUM: int = 8
     NUM_WORKERS: int = 4
     SEED: int = 42
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
     USE_AMP: bool = True
 
-    # finetune control (vision tower only)
+    # Finetune control
     FINETUNE_VISION: bool = True
-    TRAIN_LAST_N_VIT_BLOCKS: int = 2   # 0 = all blocks
+    TRAIN_LAST_N_VIT_BLOCKS: int = 8
 
-    # BYOL MLP sizes (token-level)
+    # BYOL MLP sizes
     PROJ_HIDDEN: int = 2048
     PROJ_OUT: int = 256
 
-    # optim
-    LR_VIT: float = 1e-6
-    LR_HEAD: float = 5e-5
+    # Optim
+    LR_VIT: float = 1e-5
+    LR_HEAD: float = 1e-4
     WEIGHT_DECAY: float = 1e-2
     GRAD_CLIP: float = 1.0
 
     # EMA
     EMA_MOMENTUM: float = 0.996
 
-    # augmentation (photometric; no crop/resize to preserve patch index alignment)
-    COLOR_JITTER_PROB: float = 0.8
-    COLOR_JITTER_MIN: float = 0.6   # was 0.85 (±15%) → now ±40%
-    COLOR_JITTER_MAX: float = 1.4
-    GRAYSCALE_PROB: float = 0.2     # was 0.05
-    BLUR_PROB: float = 0.5          # was 0.15
-    BLUR_RADIUS_MIN: float = 0.5    # was 0.1
-    BLUR_RADIUS_MAX: float = 2.0    # was 1.0
-    ROT_PROB: float  = 0.3   # probability of applying rotation
-    ROT_MAX_DEG: float = 1.0  # max rotation angle in degrees (±)
-
-    # debug
+    # Debug
     PRINT_SHAPES_ONCE: bool = True
     PRINT_TRAINABLE_PARAM_SUMMARY: bool = True
 
@@ -96,7 +102,7 @@ print(f"[Info] Device = {cfg.DEVICE}")
 
 
 # =========================
-# Utils
+# 1) Utils
 # =========================
 def set_seed(seed: int):
     random.seed(seed)
@@ -106,25 +112,137 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def find_images(root: str, exts: tuple) -> List[str]:
-    """Recursively find all image files under root."""
-    found = []
-    for dirpath, _, filenames in os.walk(root):
-        for fname in filenames:
-            if fname.lower().endswith(exts):
-                found.append(os.path.join(dirpath, fname))
-    found.sort()
-    if not found:
-        raise FileNotFoundError(f"No images found under: {root}")
-    return found
+def find_videos(input_dir: Path, exts=(".mp4", ".avi", ".mov", ".mkv")) -> List[Path]:
+    return sorted([
+        p for p in input_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in exts
+    ])
+
+
+def get_nframes_cv2(path: Path) -> int:
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return 0
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return n
+
+
+def get_nframes_pyav_or_cv2(path: Path) -> int:
+    """
+    PyAV stream.frames can be 0 for some videos.
+    Fall back to OpenCV frame count when needed.
+    """
+    try:
+        container = av.open(str(path))
+        stream = container.streams.video[0]
+        n = int(stream.frames or 0)
+        container.close()
+        if n > 0:
+            return n
+    except Exception:
+        pass
+
+    return get_nframes_cv2(path)
+
+
+def read_frame_as_pil_pyav(video_path: Path, frame_idx: int) -> Optional[Image.Image]:
+    """
+    Decode a specific frame index using PyAV and return PIL.Image.
+    """
+    try:
+        container = av.open(str(video_path))
+    except Exception as e:
+        print(f"❌ Cannot open video {video_path}: {e}")
+        return None
+
+    try:
+        stream = container.streams.video[0]
+        for i, frame in enumerate(container.decode(stream)):
+            if i == frame_idx:
+                img = frame.to_image().convert("RGB")
+                container.close()
+                return img
+    except Exception as e:
+        print(f"❌ Cannot decode frame {frame_idx} from {video_path}: {e}")
+    finally:
+        try:
+            container.close()
+        except Exception:
+            pass
+
+    return None
 
 
 def count_trainable_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def collect_video_splits(
+    video_dirs: List[str],
+    seed: int = 42,
+    val_ratio: float = 0.1,
+) -> Tuple[List[List[Path]], List[List[Path]], List[str]]:
+    """
+    For each dataset folder:
+    - recursively find videos
+    - split train/val inside that folder
+    - return train groups and val groups
+
+    Return:
+        train_groups: List[List[Path]]
+        val_groups:   List[List[Path]]
+        source_names: List[str]
+    """
+    rng = random.Random(seed)
+
+    train_groups: List[List[Path]] = []
+    val_groups: List[List[Path]] = []
+    source_names: List[str] = []
+
+    print("\n[Info] Collecting videos from multiple folders:")
+
+    for root in video_dirs:
+        root_path = Path(root)
+
+        if not root_path.exists():
+            raise FileNotFoundError(f"Video folder does not exist: {root}")
+
+        files = find_videos(root_path)
+
+        if len(files) == 0:
+            raise FileNotFoundError(f"No video files found under: {root}")
+
+        rng.shuffle(files)
+
+        if len(files) == 1:
+            train_files = files
+            val_files = files
+        else:
+            split_idx = int(len(files) * (1.0 - val_ratio))
+            split_idx = max(1, min(split_idx, len(files) - 1))
+            train_files = files[:split_idx]
+            val_files = files[split_idx:]
+
+        source_name = root_path.name
+
+        train_groups.append(train_files)
+        val_groups.append(val_files)
+        source_names.append(source_name)
+
+        print(f"  - Source: {source_name}")
+        print(f"    path  = {root}")
+        print(f"    total = {len(files)}, train = {len(train_files)}, val = {len(val_files)}")
+
+    print(f"\n[Info] Total train videos = {sum(len(g) for g in train_groups)}")
+    print(f"[Info] Total val videos   = {sum(len(g) for g in val_groups)}")
+    print(f"[Info] Source balanced sampling = {cfg.SOURCE_BALANCED}\n")
+
+    return train_groups, val_groups, source_names
+
+
 # =========================
-# Augmentations (PIL) - NO CROP/RESIZE
+# 2) Augmentations
 # =========================
 def _to_grayscale(img: Image.Image) -> Image.Image:
     return img.convert("L").convert("RGB")
@@ -132,71 +250,135 @@ def _to_grayscale(img: Image.Image) -> Image.Image:
 
 def augment_view(img: Image.Image, rng: np.random.RandomState) -> Image.Image:
     """
-    NO random resized crop in this augmentation.
-    Augmentations applied:
-    - color jitter         (prob COLOR_JITTER_PROB)  brightness / contrast / saturation
-    - random grayscale     (prob GRAYSCALE_PROB)
-    - gaussian blur        (prob BLUR_PROB, radius in [BLUR_RADIUS_MIN, BLUR_RADIUS_MAX])
-    - small rotation       (prob ROT_PROB, angle uniformly sampled in ±ROT_MAX_DEG)
-      expand=False keeps the canvas size the same; corners are filled with black.
+    No crop / no random resize.
+    HF processor may still deterministically resize to model input size.
     """
-    if rng.rand() < cfg.COLOR_JITTER_PROB:
-        lo, hi = cfg.COLOR_JITTER_MIN, cfg.COLOR_JITTER_MAX
-        img = ImageEnhance.Brightness(img).enhance(float(rng.uniform(lo, hi)))
-        img = ImageEnhance.Contrast(img).enhance(float(rng.uniform(lo, hi)))
-        img = ImageEnhance.Color(img).enhance(float(rng.uniform(lo, hi)))
+    if rng.rand() < 0.85:
+        img = ImageEnhance.Brightness(img).enhance(float(rng.uniform(0.85, 1.15)))
+        img = ImageEnhance.Contrast(img).enhance(float(rng.uniform(0.85, 1.15)))
+        img = ImageEnhance.Color(img).enhance(float(rng.uniform(0.85, 1.15)))
 
-    if rng.rand() < cfg.GRAYSCALE_PROB:
+    if rng.rand() < 0.05:
         img = _to_grayscale(img)
 
-    if rng.rand() < cfg.BLUR_PROB:
-        radius = float(rng.uniform(cfg.BLUR_RADIUS_MIN, cfg.BLUR_RADIUS_MAX))
-        img = img.filter(ImageFilter.GaussianBlur(radius=radius))
-
-    if rng.rand() < cfg.ROT_PROB:
-        angle = float(rng.uniform(-cfg.ROT_MAX_DEG, cfg.ROT_MAX_DEG))
-        img = img.rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=(0, 0, 0))
+    if rng.rand() < 0.15:
+        img = img.filter(ImageFilter.GaussianBlur(radius=float(rng.uniform(0.1, 1.0))))
 
     return img
 
 
 # =========================
-# Dataset: sample 1 image -> (clean, aug)
+# 3) Dataset
 # =========================
-class ImageFolderBYOLDataset(Dataset):
+class VideoFrameBYOLDatasetPyAV(Dataset):
     """
-    Replaces VideoFrameBYOLDatasetPyAV.
-    Samples images randomly from a flat list with replacement,
-    so SAMPLES_PER_EPOCH controls epoch length independently of dataset size.
-    """
+    Samples one random frame and returns:
+        clean image, augmented image
 
-    def __init__(self, file_list: List[str], samples_per_epoch: int, seed: int = 42):
-        self.file_list = file_list
+    Supports:
+    - merged sampling
+    - source-balanced sampling
+    """
+    def __init__(
+        self,
+        video_groups: List[List[Path]],
+        source_names: List[str],
+        samples_per_epoch: int,
+        seed: int = 42,
+        min_frames: int = 30,
+        source_balanced: bool = True,
+    ):
         self.samples_per_epoch = samples_per_epoch
-        self.rng = np.random.RandomState(seed)
+        self.seed = seed
+        self.min_frames = min_frames
+        self.source_balanced = source_balanced
 
-        if not self.file_list:
-            raise RuntimeError("ImageFolderBYOLDataset: empty file list.")
+        assert len(video_groups) == len(source_names)
 
-        print(f"[Dataset] {len(self.file_list)} images available, "
-              f"sampling {self.samples_per_epoch} per epoch.")
+        self.groups = []
+        self.flat_files: List[Path] = []
+        self.flat_nframes: List[int] = []
 
-    def __len__(self) -> int:
+        print("[Info] Filtering valid videos:")
+
+        for source_name, files in zip(source_names, video_groups):
+            valid_files = []
+            valid_nframes = []
+
+            for p in files:
+                n = get_nframes_pyav_or_cv2(p)
+                if n >= min_frames:
+                    valid_files.append(p)
+                    valid_nframes.append(n)
+
+            if len(valid_files) > 0:
+                self.groups.append({
+                    "name": source_name,
+                    "files": valid_files,
+                    "nframes": valid_nframes,
+                })
+
+                self.flat_files.extend(valid_files)
+                self.flat_nframes.extend(valid_nframes)
+
+            print(f"  - {source_name}: valid {len(valid_files)} / raw {len(files)}")
+
+        if len(self.flat_files) == 0:
+            raise RuntimeError("No valid videos available. Check paths, codecs, or MIN_FRAMES.")
+
+        if self.source_balanced:
+            print("[Info] Dataset sampling mode: source-balanced")
+        else:
+            print("[Info] Dataset sampling mode: merged-uniform")
+
+        print(f"[Info] Total valid videos in this split: {len(self.flat_files)}")
+
+        self._worker_rng = None
+        self._worker_id = None
+
+    def __len__(self):
         return self.samples_per_epoch
 
-    def __getitem__(self, idx: int):
-        # Sample a random image (with replacement)
-        path = self.file_list[int(self.rng.randint(0, len(self.file_list)))]
+    def _get_rng(self) -> np.random.RandomState:
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
 
-        try:
-            img = Image.open(path).convert("RGB")
-        except Exception as e:
-            print(f"[Warn] Failed to open {path}: {e}. Retrying with next index.")
-            return self.__getitem__(idx + 1)
+        if self._worker_rng is None or self._worker_id != worker_id:
+            self._worker_id = worker_id
+            self._worker_rng = np.random.RandomState(self.seed + 1009 * worker_id)
 
-        v_clean = img
-        v_aug   = augment_view(img, self.rng)
-        return v_clean, v_aug
+        return self._worker_rng
+
+    def _sample_video(self, rng: np.random.RandomState) -> Tuple[Path, int]:
+        if self.source_balanced and len(self.groups) > 1:
+            group_idx = int(rng.randint(0, len(self.groups)))
+            group = self.groups[group_idx]
+            vid_i = int(rng.randint(0, len(group["files"])))
+            return group["files"][vid_i], group["nframes"][vid_i]
+
+        vid_i = int(rng.randint(0, len(self.flat_files)))
+        return self.flat_files[vid_i], self.flat_nframes[vid_i]
+
+    def __getitem__(self, idx):
+        rng = self._get_rng()
+
+        for _ in range(20):
+            path, n = self._sample_video(rng)
+
+            if n <= 0:
+                continue
+
+            frame_idx = int(rng.randint(0, n))
+            x = read_frame_as_pil_pyav(path, frame_idx)
+
+            if x is None:
+                continue
+
+            v_clean = x
+            v_aug = augment_view(x, rng)
+            return v_clean, v_aug
+
+        raise RuntimeError("Failed to sample a readable frame after 20 attempts.")
 
 
 def collate_fn(batch):
@@ -205,7 +387,7 @@ def collate_fn(batch):
 
 
 # =========================
-# Encode helper: Vision last_hidden_state TOKENS
+# 4) Encode helper
 # =========================
 def encode_vision_last_hidden_tokens(
     model: AutoModel,
@@ -214,32 +396,34 @@ def encode_vision_last_hidden_tokens(
     device: str,
 ) -> torch.Tensor:
     """
-    Returns (B, N, D) patch tokens from vision_model.last_hidden_state.
+    Return patch tokens:
+        (B, N, D)
     """
     inputs = processor(images=images, return_tensors="pt").to(device)
 
     if not hasattr(model, "vision_model"):
-        raise ValueError("Model has no vision_model attribute. "
-                         "Make sure you are loading a SigLIP / SigLIP2 model.")
+        raise ValueError("Model has no vision_model attribute. Please check SigLIP/SigLIP2 loading.")
 
     vision_out = model.vision_model(
         pixel_values=inputs["pixel_values"],
         output_hidden_states=False,
         return_dict=True,
     )
-    return vision_out.last_hidden_state  # (B, N, D)
+
+    return vision_out.last_hidden_state
 
 
 # =========================
-# Token-level BYOL MLP (LayerNorm)
+# 5) Token-level BYOL modules
 # =========================
 class TokenBYOLMLP(nn.Module):
     """
-    (B, N, D) -> (B, N, out_dim)
-    Uses LayerNorm instead of BN to handle token-level inputs.
+    Supports:
+        (B, N, D) -> (B, N, out_dim)
     """
     def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
         super().__init__()
+
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -252,7 +436,10 @@ class TokenBYOLMLP(nn.Module):
 
 
 def byol_loss_tokens(p: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-    """Token-level BYOL loss. p, z: (B, N, P)"""
+    """
+    Token-level BYOL loss.
+    p, z: (B, N, P)
+    """
     p = F.normalize(p, dim=-1)
     z = F.normalize(z, dim=-1)
     return 2.0 - 2.0 * (p * z).sum(dim=-1).mean()
@@ -264,20 +451,36 @@ def ema_update(teacher: nn.Module, student: nn.Module, m: float):
         tp.data.mul_(m).add_(sp.data, alpha=(1.0 - m))
 
 
+@torch.no_grad()
+def ema_update_vision_only(teacher: AutoModel, student: AutoModel, m: float):
+    if hasattr(teacher, "vision_model") and hasattr(student, "vision_model"):
+        ema_update(teacher.vision_model, student.vision_model, m)
+    else:
+        ema_update(teacher, student, m)
+
+
 # =========================
-# Finetune scope helper (VISION ONLY)
+# 6) Finetune scope
 # =========================
 def set_vision_trainable(siglip2: AutoModel, train_last_n_blocks: int):
+    """
+    train_last_n_blocks = 0:
+        train all vision tower params
+
+    train_last_n_blocks > 0:
+        train last N Transformer blocks + all LayerNorms
+    """
     for p in siglip2.parameters():
         p.requires_grad = False
 
     if not hasattr(siglip2, "vision_model"):
-        print("[Warn] No vision_model found, unfreezing entire model.")
+        print("[Warn] No vision_model found. Unfreezing the whole model.")
         for p in siglip2.parameters():
             p.requires_grad = True
         return
 
     vm = siglip2.vision_model
+
     layers = None
     if hasattr(vm, "encoder") and hasattr(vm.encoder, "layers"):
         layers = vm.encoder.layers
@@ -285,14 +488,15 @@ def set_vision_trainable(siglip2: AutoModel, train_last_n_blocks: int):
         layers = vm.encoder.layer
 
     if layers is None:
-        print("[Warn] Cannot find encoder layers, unfreezing entire vision_model.")
+        print("[Warn] Cannot find encoder layers. Unfreezing whole vision_model.")
         for p in vm.parameters():
             p.requires_grad = True
         return
 
     n = len(layers)
     start = 0 if train_last_n_blocks <= 0 else max(0, n - train_last_n_blocks)
-    print(f"[Info] Unfreezing vision blocks: {start}..{n-1} (total {n})")
+
+    print(f"[Info] Unfreezing vision blocks: {start}..{n - 1} / total {n}")
 
     for i in range(start, n):
         for p in layers[i].parameters():
@@ -310,35 +514,36 @@ def get_trainable_vision_params(siglip2: AutoModel):
     return [p for p in siglip2.parameters() if p.requires_grad]
 
 
-@torch.no_grad()
-def ema_update_vision_only(teacher: AutoModel, student: AutoModel, m: float):
-    if hasattr(teacher, "vision_model") and hasattr(student, "vision_model"):
-        ema_update(teacher.vision_model, student.vision_model, m)
-    else:
-        ema_update(teacher, student, m)
-
-
 # =========================
-# Main
+# 7) Main
 # =========================
 def main():
     set_seed(cfg.SEED)
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
-    # ---- Discover images ----
-    all_images = find_images(cfg.IMAGE_DIR, cfg.IMAGE_EXTS)
-    print(f"[Info] Total images found : {len(all_images)}")
+    train_groups, val_groups, source_names = collect_video_splits(
+        cfg.VIDEO_DIRS,
+        seed=cfg.SEED,
+        val_ratio=cfg.VAL_RATIO,
+    )
 
-    # ---- Train / val split (by file, not by sample) ----
-    random.shuffle(all_images)
-    split_idx   = int(len(all_images) * 0.9)
-    train_files = all_images[:split_idx]
-    val_files   = all_images[split_idx:] or train_files   # fallback if tiny dataset
+    train_ds = VideoFrameBYOLDatasetPyAV(
+        video_groups=train_groups,
+        source_names=source_names,
+        samples_per_epoch=cfg.SAMPLES_PER_EPOCH,
+        seed=cfg.SEED,
+        min_frames=cfg.MIN_FRAMES,
+        source_balanced=cfg.SOURCE_BALANCED,
+    )
 
-    print(f"[Info] Train images : {len(train_files)} | Val images : {len(val_files)}")
-
-    train_ds = ImageFolderBYOLDataset(train_files, cfg.SAMPLES_PER_EPOCH, seed=cfg.SEED)
-    val_ds   = ImageFolderBYOLDataset(val_files,   cfg.VAL_SAMPLES,        seed=cfg.SEED + 1)
+    val_ds = VideoFrameBYOLDatasetPyAV(
+        video_groups=val_groups,
+        source_names=source_names,
+        samples_per_epoch=cfg.VAL_SAMPLES,
+        seed=cfg.SEED + 1,
+        min_frames=cfg.MIN_FRAMES,
+        source_balanced=cfg.SOURCE_BALANCED,
+    )
 
     train_dl = DataLoader(
         train_ds,
@@ -348,7 +553,9 @@ def main():
         num_workers=cfg.NUM_WORKERS,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=(cfg.NUM_WORKERS > 0),
     )
+
     val_dl = DataLoader(
         val_ds,
         batch_size=cfg.BATCH_SIZE,
@@ -357,13 +564,15 @@ def main():
         num_workers=cfg.NUM_WORKERS,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=(cfg.NUM_WORKERS > 0),
     )
 
-    # ---- Load student model ----
+    # ---- Load student ----
     print(f"[Info] Loading model: {cfg.MODEL_NAME}")
-    student   = AutoModel.from_pretrained(cfg.MODEL_NAME).to(cfg.DEVICE)
+    student = AutoModel.from_pretrained(cfg.MODEL_NAME).to(cfg.DEVICE)
     processor = AutoProcessor.from_pretrained(cfg.MODEL_NAME)
 
+    # ---- Freeze / unfreeze vision ----
     if cfg.FINETUNE_VISION:
         set_vision_trainable(student, cfg.TRAIN_LAST_N_VIT_BLOCKS)
     else:
@@ -371,148 +580,258 @@ def main():
             p.requires_grad = False
 
     if cfg.PRINT_TRAINABLE_PARAM_SUMMARY:
-        print(f"[Info] Trainable params (student) = {count_trainable_params(student):,}")
+        print(f"[Info] Trainable param count, student total = {count_trainable_params(student):,}")
 
-    # ---- Build teacher (EMA copy, frozen) ----
+    # ---- Build teacher ----
     teacher = AutoModel.from_pretrained(cfg.MODEL_NAME).to(cfg.DEVICE)
     teacher.load_state_dict(student.state_dict(), strict=True)
     teacher.eval()
+
     for p in teacher.parameters():
         p.requires_grad = False
 
-    # ---- Infer token dim from one batch ----
+    # ---- Infer token dimension ----
     with torch.no_grad():
         v_clean_pil, _ = next(iter(train_dl))
-        tok = encode_vision_last_hidden_tokens(teacher, processor, v_clean_pil, cfg.DEVICE)
+        tok = encode_vision_last_hidden_tokens(
+            teacher,
+            processor,
+            v_clean_pil,
+            cfg.DEVICE,
+        )
+
         feat_dim = tok.shape[-1]
         n_tokens = tok.shape[1]
+
         if cfg.PRINT_SHAPES_ONCE:
-            print(f"[Info] Token shape = {tuple(tok.shape)}  => N={n_tokens}, D={feat_dim}")
+            print(f"[Info] Tokens shape = {tuple(tok.shape)} => N = {n_tokens}, D = {feat_dim}")
 
-    # ---- Projector & predictor (token-level) ----
-    proj_s = TokenBYOLMLP(feat_dim, cfg.PROJ_HIDDEN, cfg.PROJ_OUT).to(cfg.DEVICE)
-    pred_s = TokenBYOLMLP(cfg.PROJ_OUT, cfg.PROJ_HIDDEN, cfg.PROJ_OUT).to(cfg.DEVICE)
+    # ---- Projector and predictor ----
+    proj_s = TokenBYOLMLP(
+        in_dim=feat_dim,
+        hidden_dim=cfg.PROJ_HIDDEN,
+        out_dim=cfg.PROJ_OUT,
+    ).to(cfg.DEVICE)
 
-    proj_t = TokenBYOLMLP(feat_dim, cfg.PROJ_HIDDEN, cfg.PROJ_OUT).to(cfg.DEVICE)
+    pred_s = TokenBYOLMLP(
+        in_dim=cfg.PROJ_OUT,
+        hidden_dim=cfg.PROJ_HIDDEN,
+        out_dim=cfg.PROJ_OUT,
+    ).to(cfg.DEVICE)
+
+    proj_t = TokenBYOLMLP(
+        in_dim=feat_dim,
+        hidden_dim=cfg.PROJ_HIDDEN,
+        out_dim=cfg.PROJ_OUT,
+    ).to(cfg.DEVICE)
+
     proj_t.load_state_dict(proj_s.state_dict(), strict=True)
     proj_t.eval()
+
     for p in proj_t.parameters():
         p.requires_grad = False
 
-    # ---- Print param summary ----
-    total_student  = sum(p.numel() for p in student.parameters())
-    trainable_vit  = sum(p.numel() for p in student.parameters() if p.requires_grad)
-    proj_s_params  = sum(p.numel() for p in proj_s.parameters())
-    pred_s_params  = sum(p.numel() for p in pred_s.parameters())
-    total_trainable = trainable_vit + proj_s_params + pred_s_params
+    total_student = sum(p.numel() for p in student.parameters())
+    trainable_vit = sum(p.numel() for p in student.parameters() if p.requires_grad)
+    proj_s_params = sum(p.numel() for p in proj_s.parameters())
+    pred_s_params = sum(p.numel() for p in pred_s.parameters())
+    byol_head_params = proj_s_params + pred_s_params
+    total_trainable = trainable_vit + byol_head_params
 
-    print(f"\n{'='*50}")
-    print(f"[Params] SigLIP2 total                       : {total_student:,} ({total_student/1e6:.1f}M)")
-    print(f"[Params] ViT trainable (last {cfg.TRAIN_LAST_N_VIT_BLOCKS} blocks)      : {trainable_vit:,} ({trainable_vit/1e6:.1f}M)")
-    print(f"[Params] BYOL Projector                      : {proj_s_params:,} ({proj_s_params/1e6:.1f}M)")
-    print(f"[Params] BYOL Predictor                      : {pred_s_params:,} ({pred_s_params/1e6:.1f}M)")
-    print(f"[Params] Total trainable                     : {total_trainable:,} ({total_trainable/1e6:.1f}M)")
-    print(f"{'='*50}\n")
+    print(f"\n{'=' * 60}")
+    print(f"[Params] SigLIP2 total           : {total_student:,} ({total_student / 1e6:.1f}M)")
+    print(f"[Params] ViT trainable           : {trainable_vit:,} ({trainable_vit / 1e6:.1f}M)")
+    print(f"[Params] BYOL Projector          : {proj_s_params:,} ({proj_s_params / 1e6:.1f}M)")
+    print(f"[Params] BYOL Predictor          : {pred_s_params:,} ({pred_s_params / 1e6:.1f}M)")
+    print(f"[Params] Total trainable Stage 1 : {total_trainable:,} ({total_trainable / 1e6:.1f}M)")
+    print(f"{'=' * 60}\n")
 
     # ---- Optimizer ----
-    vit_params    = get_trainable_vision_params(student)
-    optim_groups  = []
-    if vit_params:
-        optim_groups.append({"params": vit_params, "lr": cfg.LR_VIT})
+    vit_params = get_trainable_vision_params(student)
+
+    optim_groups = []
+
+    if len(vit_params) > 0:
+        optim_groups.append({
+            "params": vit_params,
+            "lr": cfg.LR_VIT,
+        })
+
     optim_groups += [
-        {"params": proj_s.parameters(), "lr": cfg.LR_HEAD},
-        {"params": pred_s.parameters(), "lr": cfg.LR_HEAD},
+        {
+            "params": proj_s.parameters(),
+            "lr": cfg.LR_HEAD,
+        },
+        {
+            "params": pred_s.parameters(),
+            "lr": cfg.LR_HEAD,
+        },
     ]
-    optimizer = torch.optim.AdamW(optim_groups, weight_decay=cfg.WEIGHT_DECAY)
-    scaler    = torch.amp.GradScaler(enabled=(cfg.USE_AMP and cfg.DEVICE == "cuda"))
+
+    optimizer = torch.optim.AdamW(
+        optim_groups,
+        weight_decay=cfg.WEIGHT_DECAY,
+    )
+
+    scaler = torch.amp.GradScaler(
+        enabled=(cfg.USE_AMP and cfg.DEVICE == "cuda")
+    )
 
     best_val = float("inf")
 
-    print("[Info] Start BYOL training (TOKEN-LEVEL, TEACHER=CLEAN ONLY).")
-    print(f"       FINETUNE_VISION={cfg.FINETUNE_VISION}, TRAIN_LAST_N_VIT_BLOCKS={cfg.TRAIN_LAST_N_VIT_BLOCKS}")
-    print(f"       Color jitter   : prob={cfg.COLOR_JITTER_PROB}, range=[{cfg.COLOR_JITTER_MIN}, {cfg.COLOR_JITTER_MAX}]")
-    print(f"       Grayscale      : prob={cfg.GRAYSCALE_PROB}")
-    print(f"       Gaussian blur  : prob={cfg.BLUR_PROB}, radius=[{cfg.BLUR_RADIUS_MIN}, {cfg.BLUR_RADIUS_MAX}]")
-    print(f"       Rotation aug   : prob={cfg.ROT_PROB}, max_angle=±{cfg.ROT_MAX_DEG}°")
-    print("       Teacher target : z_t(clean)")
-    print("       Student input  : aug -> proj_s -> pred_s")
-    print("       Loss           : BYOL(p(aug), z_t(clean))  (mean over B*N)")
+    print("[Info] Start BYOL training.")
+    print(f"       FINETUNE_VISION        = {cfg.FINETUNE_VISION}")
+    print(f"       TRAIN_LAST_N_VIT_BLOCKS = {cfg.TRAIN_LAST_N_VIT_BLOCKS}")
+    print(f"       SOURCE_BALANCED        = {cfg.SOURCE_BALANCED}")
+    print("       Teacher target          = clean image")
+    print("       Student input           = augmented image")
+    print("       Loss                    = token-level BYOL loss\n")
 
+    # =========================
+    # Training loop
+    # =========================
     for epoch in range(1, cfg.EPOCHS + 1):
         student.train()
         proj_s.train()
         pred_s.train()
 
         optimizer.zero_grad(set_to_none=True)
+
         tr_loss = 0.0
-        steps   = 0
+        steps = 0
 
         pbar = tqdm(train_dl, desc=f"Ep {epoch}/{cfg.EPOCHS} [Train]")
+
         for it, (v_clean_pil, v_aug_pil) in enumerate(pbar):
-
-            # ---- Teacher forward: CLEAN (no grad) ----
+            # ---- Teacher forward: clean only ----
             with torch.no_grad():
-                t_clean = encode_vision_last_hidden_tokens(teacher, processor, v_clean_pil, cfg.DEVICE)
-                z_t     = proj_t(t_clean)   # (B, N, P)
+                t_clean = encode_vision_last_hidden_tokens(
+                    teacher,
+                    processor,
+                    v_clean_pil,
+                    cfg.DEVICE,
+                )
 
-            # ---- Student forward: AUG ----
-            with torch.amp.autocast(device_type="cuda", enabled=(cfg.USE_AMP and cfg.DEVICE == "cuda")):
-                s_aug = encode_vision_last_hidden_tokens(student, processor, v_aug_pil, cfg.DEVICE)
-                z     = proj_s(s_aug)        # (B, N, P)
-                p     = pred_s(z)            # (B, N, P)
-                loss  = byol_loss_tokens(p, z_t.detach()) / float(cfg.GRAD_ACCUM)
+                z_t = proj_t(t_clean)
+
+            # ---- Student forward: augmented only ----
+            with torch.amp.autocast(
+                device_type="cuda",
+                enabled=(cfg.USE_AMP and cfg.DEVICE == "cuda"),
+            ):
+                s_aug = encode_vision_last_hidden_tokens(
+                    student,
+                    processor,
+                    v_aug_pil,
+                    cfg.DEVICE,
+                )
+
+                z = proj_s(s_aug)
+                p = pred_s(z)
+
+                loss = byol_loss_tokens(p, z_t.detach())
+                loss = loss / float(cfg.GRAD_ACCUM)
 
             scaler.scale(loss).backward()
 
-            if (it + 1) % cfg.GRAD_ACCUM == 0:
-                if cfg.GRAD_CLIP > 0:
+            do_step = ((it + 1) % cfg.GRAD_ACCUM == 0) or ((it + 1) == len(train_dl))
+
+            if do_step:
+                if cfg.GRAD_CLIP and cfg.GRAD_CLIP > 0:
                     scaler.unscale_(optimizer)
-                    params_for_clip = vit_params + list(proj_s.parameters()) + list(pred_s.parameters())
-                    torch.nn.utils.clip_grad_norm_(params_for_clip, cfg.GRAD_CLIP)
+
+                    params_for_clip = (
+                        vit_params
+                        + list(proj_s.parameters())
+                        + list(pred_s.parameters())
+                    )
+
+                    torch.nn.utils.clip_grad_norm_(
+                        params_for_clip,
+                        cfg.GRAD_CLIP,
+                    )
 
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-                ema_update_vision_only(teacher, student, cfg.EMA_MOMENTUM)
-                ema_update(proj_t, proj_s, cfg.EMA_MOMENTUM)
+                # EMA update teacher vision tower and teacher projector.
+                ema_update_vision_only(
+                    teacher,
+                    student,
+                    cfg.EMA_MOMENTUM,
+                )
+
+                ema_update(
+                    proj_t,
+                    proj_s,
+                    cfg.EMA_MOMENTUM,
+                )
 
             tr_loss += float(loss.item()) * float(cfg.GRAD_ACCUM)
-            steps   += 1
-            pbar.set_postfix({"L": f"{tr_loss/max(steps,1):.3f}"})
+            steps += 1
 
-        # ---- Validation ----
+            pbar.set_postfix({
+                "L": f"{tr_loss / max(steps, 1):.3f}"
+            })
+
+        # =========================
+        # Validation
+        # =========================
         student.eval()
         proj_s.eval()
         pred_s.eval()
 
         va_loss = 0.0
-        vsteps  = 0
+        vsteps = 0
+
         with torch.no_grad():
             for v_clean_pil, v_aug_pil in val_dl:
-                t_clean = encode_vision_last_hidden_tokens(teacher, processor, v_clean_pil, cfg.DEVICE)
-                z_t     = proj_t(t_clean)
+                t_clean = encode_vision_last_hidden_tokens(
+                    teacher,
+                    processor,
+                    v_clean_pil,
+                    cfg.DEVICE,
+                )
 
-                s_aug = encode_vision_last_hidden_tokens(student, processor, v_aug_pil, cfg.DEVICE)
-                z     = proj_s(s_aug)
-                p     = pred_s(z)
+                z_t = proj_t(t_clean)
 
-                va_loss += float(byol_loss_tokens(p, z_t).item())
-                vsteps  += 1
+                s_aug = encode_vision_last_hidden_tokens(
+                    student,
+                    processor,
+                    v_aug_pil,
+                    cfg.DEVICE,
+                )
+
+                z = proj_s(s_aug)
+                p = pred_s(z)
+
+                loss = byol_loss_tokens(p, z_t)
+
+                va_loss += float(loss.item())
+                vsteps += 1
 
         avg_tr = tr_loss / max(steps, 1)
         avg_va = va_loss / max(vsteps, 1)
+
         print(f"\nEpoch {epoch} Result:")
         print(f"  Train Loss = {avg_tr:.6f}")
         print(f"  Val   Loss = {avg_va:.6f}")
 
-        # ---- Save checkpoint every epoch ----
+        # =========================
+        # Save checkpoint every epoch
+        # =========================
         epoch_dir = os.path.join(cfg.OUTPUT_DIR, f"epoch_{epoch:03d}")
         os.makedirs(epoch_dir, exist_ok=True)
-        save_dir  = os.path.join(epoch_dir, "finetuned_byol_vit_patchtokens_tokenlevel")
+
+        save_dir = os.path.join(
+            epoch_dir,
+            "finetuned_byol_vit_patchtokens_tokenlevel",
+        )
 
         student.save_pretrained(save_dir)
         processor.save_pretrained(save_dir)
+
         torch.save(
             {
                 "proj_s": proj_s.state_dict(),
@@ -521,20 +840,30 @@ def main():
                 "epoch": epoch,
                 "train_loss": avg_tr,
                 "val_loss": avg_va,
+                "best_val_loss_so_far": best_val,
             },
             os.path.join(epoch_dir, "byol_heads.pt"),
         )
-        print(f"  [CKPT] Saved -> {epoch_dir}")
 
-        # ---- Save best ----
+        print(f"  [CKPT] Saved epoch checkpoint -> {epoch_dir}")
+
+        # =========================
+        # Save best
+        # =========================
         if avg_va < best_val:
             best_val = avg_va
-            best_dir      = os.path.join(cfg.OUTPUT_DIR, "best")
-            best_save_dir = os.path.join(best_dir, "finetuned_byol_vit_patchtokens_tokenlevel")
+
+            best_dir = os.path.join(cfg.OUTPUT_DIR, "best")
             os.makedirs(best_dir, exist_ok=True)
+
+            best_save_dir = os.path.join(
+                best_dir,
+                "finetuned_byol_vit_patchtokens_tokenlevel",
+            )
 
             student.save_pretrained(best_save_dir)
             processor.save_pretrained(best_save_dir)
+
             torch.save(
                 {
                     "proj_s": proj_s.state_dict(),
@@ -547,12 +876,15 @@ def main():
                 },
                 os.path.join(best_dir, "byol_heads.pt"),
             )
-            print(f"  ★ New Best! Saved -> {best_dir}")
+
+            print(f"  ★ New Best! Saved best model -> {best_dir}")
 
     print("\n[Done] BYOL Finetune Finished.")
     print(f"Best Val Loss = {best_val:.6f}")
-    print(f"\n[Next] Load finetuned model with:")
-    print(f"  MODEL_NAME = '{os.path.join(cfg.OUTPUT_DIR, 'best', 'finetuned_byol_vit_patchtokens_tokenlevel')}'")
+    print("\n[Next] Downstream Stage 2 should use:")
+    print(
+        f"  MODEL_NAME = '{os.path.join(cfg.OUTPUT_DIR, 'best', 'finetuned_byol_vit_patchtokens_tokenlevel')}'"
+    )
 
 
 if __name__ == "__main__":
