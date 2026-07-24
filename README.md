@@ -30,6 +30,8 @@
 
 # 第二階段監督式對比學習
 
-1. 把 embedding_text_image.py 中的 model-name 的 default="google/siglip2-base-patch16-512" 路徑改成第一階段模型權重，並執行。
+1. 把 embedding_text_image.py 中的 model-name 的 default="google/siglip2-base-patch16-512" 路徑改成第一階段模型權重，並執行
 
 2. 把 swiftplan_train.py MODEL_NAME 也改成和上一步一樣，並執行，會訓練模型並對模型在測試資料上測試
+
+3. 如果發現 best val 都在前段(小於 15 epoch)，可以調一下第二階段的訓練 batch size
