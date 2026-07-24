@@ -91,6 +91,17 @@ class CFG:
     # EMA
     EMA_MOMENTUM: float = 0.996
 
+    # Augmentation (photometric + tiny rotation; no crop/resize)
+    COLOR_JITTER_PROB: float = 0.8
+    COLOR_JITTER_MIN: float = 0.6    # ±40%
+    COLOR_JITTER_MAX: float = 1.4
+    GRAYSCALE_PROB: float = 0.2
+    BLUR_PROB: float = 0.8
+    BLUR_RADIUS_MIN: float = 0.5
+    BLUR_RADIUS_MAX: float = 2.0
+    ROT_PROB: float = 0.2            # random ±1° rotation
+    ROT_MAX_DEG: float = 1.0
+
     # Debug
     PRINT_SHAPES_ONCE: bool = True
     PRINT_TRAINABLE_PARAM_SUMMARY: bool = True
@@ -244,6 +255,30 @@ def collect_video_splits(
 # =========================
 # 2) Augmentations
 # =========================
+# #region agent log
+import json
+import time
+_DEBUG_LOG_PATH = "/home/mark/Desktop/swiftplan_code-main/.cursor/debug-9bd7c0.log"
+_DEBUG_AUG_COUNT = 0
+
+
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "aug-pre"):
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "sessionId": "9bd7c0",
+                "runId": run_id,
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# #endregion
+
+
 def _to_grayscale(img: Image.Image) -> Image.Image:
     return img.convert("L").convert("RGB")
 
@@ -252,17 +287,60 @@ def augment_view(img: Image.Image, rng: np.random.RandomState) -> Image.Image:
     """
     No crop / no random resize.
     HF processor may still deterministically resize to model input size.
+
+    - color jitter
+    - grayscale
+    - gaussian blur
+    - small random rotation (±ROT_MAX_DEG)
     """
-    if rng.rand() < 0.85:
-        img = ImageEnhance.Brightness(img).enhance(float(rng.uniform(0.85, 1.15)))
-        img = ImageEnhance.Contrast(img).enhance(float(rng.uniform(0.85, 1.15)))
-        img = ImageEnhance.Color(img).enhance(float(rng.uniform(0.85, 1.15)))
+    global _DEBUG_AUG_COUNT
+    applied = {"color": False, "gray": False, "blur": False, "rot_deg": None}
 
-    if rng.rand() < 0.05:
+    if rng.rand() < cfg.COLOR_JITTER_PROB:
+        lo, hi = cfg.COLOR_JITTER_MIN, cfg.COLOR_JITTER_MAX
+        img = ImageEnhance.Brightness(img).enhance(float(rng.uniform(lo, hi)))
+        img = ImageEnhance.Contrast(img).enhance(float(rng.uniform(lo, hi)))
+        img = ImageEnhance.Color(img).enhance(float(rng.uniform(lo, hi)))
+        applied["color"] = True
+
+    if rng.rand() < cfg.GRAYSCALE_PROB:
         img = _to_grayscale(img)
+        applied["gray"] = True
 
-    if rng.rand() < 0.15:
-        img = img.filter(ImageFilter.GaussianBlur(radius=float(rng.uniform(0.1, 1.0))))
+    if rng.rand() < cfg.BLUR_PROB:
+        radius = float(rng.uniform(cfg.BLUR_RADIUS_MIN, cfg.BLUR_RADIUS_MAX))
+        img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+        applied["blur"] = True
+
+    if rng.rand() < cfg.ROT_PROB:
+        angle = float(rng.uniform(-cfg.ROT_MAX_DEG, cfg.ROT_MAX_DEG))
+        img = img.rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=(0, 0, 0))
+        applied["rot_deg"] = angle
+
+    # #region agent log
+    if _DEBUG_AUG_COUNT < 8:
+        _DEBUG_AUG_COUNT += 1
+        _agent_log(
+            "H1",
+            "byol.py:augment_view",
+            "aug applied",
+            {
+                "n": _DEBUG_AUG_COUNT,
+                "applied": applied,
+                "cfg": {
+                    "COLOR_JITTER_PROB": cfg.COLOR_JITTER_PROB,
+                    "COLOR_JITTER_MIN": cfg.COLOR_JITTER_MIN,
+                    "COLOR_JITTER_MAX": cfg.COLOR_JITTER_MAX,
+                    "GRAYSCALE_PROB": cfg.GRAYSCALE_PROB,
+                    "BLUR_PROB": cfg.BLUR_PROB,
+                    "BLUR_RADIUS_MIN": cfg.BLUR_RADIUS_MIN,
+                    "BLUR_RADIUS_MAX": cfg.BLUR_RADIUS_MAX,
+                    "ROT_PROB": cfg.ROT_PROB,
+                    "ROT_MAX_DEG": cfg.ROT_MAX_DEG,
+                },
+            },
+        )
+    # #endregion
 
     return img
 
@@ -683,9 +761,26 @@ def main():
     print(f"       FINETUNE_VISION        = {cfg.FINETUNE_VISION}")
     print(f"       TRAIN_LAST_N_VIT_BLOCKS = {cfg.TRAIN_LAST_N_VIT_BLOCKS}")
     print(f"       SOURCE_BALANCED        = {cfg.SOURCE_BALANCED}")
+    print(f"       Color jitter           = prob={cfg.COLOR_JITTER_PROB}, range=[{cfg.COLOR_JITTER_MIN}, {cfg.COLOR_JITTER_MAX}]")
+    print(f"       Grayscale              = prob={cfg.GRAYSCALE_PROB}")
+    print(f"       Gaussian blur          = prob={cfg.BLUR_PROB}, radius=[{cfg.BLUR_RADIUS_MIN}, {cfg.BLUR_RADIUS_MAX}]")
+    print(f"       Rotation               = prob={cfg.ROT_PROB}, max_angle=±{cfg.ROT_MAX_DEG}°")
     print("       Teacher target          = clean image")
     print("       Student input           = augmented image")
     print("       Loss                    = token-level BYOL loss\n")
+    # #region agent log
+    _agent_log("H2", "byol.py:main", "aug cfg at train start", {
+        "COLOR_JITTER_PROB": cfg.COLOR_JITTER_PROB,
+        "COLOR_JITTER_MIN": cfg.COLOR_JITTER_MIN,
+        "COLOR_JITTER_MAX": cfg.COLOR_JITTER_MAX,
+        "GRAYSCALE_PROB": cfg.GRAYSCALE_PROB,
+        "BLUR_PROB": cfg.BLUR_PROB,
+        "BLUR_RADIUS_MIN": cfg.BLUR_RADIUS_MIN,
+        "BLUR_RADIUS_MAX": cfg.BLUR_RADIUS_MAX,
+        "ROT_PROB": cfg.ROT_PROB,
+        "ROT_MAX_DEG": cfg.ROT_MAX_DEG,
+    })
+    # #endregion
 
     # =========================
     # Training loop
