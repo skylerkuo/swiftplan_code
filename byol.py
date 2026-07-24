@@ -76,7 +76,7 @@ class CFG:
 
     # augmentation
     ROT_PROB: float  = 0.3   # probability of applying rotation
-    ROT_MAX_DEG: float = 3.0  # max rotation angle in degrees (±)
+    ROT_MAX_DEG: float = 1.0  # max rotation angle in degrees (±)
 
     # debug
     PRINT_SHAPES_ONCE: bool = True
