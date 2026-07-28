@@ -81,8 +81,16 @@ SAVE_DIR = DATA_ROOT / "captured_images"
 JSONL_PATH = DATA_ROOT / "data_gradu.jsonl"
 USD_PATH = str(DATA_ROOT / "graduation.usd")
 
-TASK_INSTRUCTION = "tidy up the properties"
-FINISHED_LABEL = f"{TASK_INSTRUCTION} finished"
+# Server 可接受的兩種完整任務指令。
+TASK_INSTRUCTIONS = {
+    "tray": "tidy up the properties into the tray",
+    "box": "tidy up the properties into the box",
+}
+
+DEFAULT_TASK_DESTINATION = "tray"
+DEFAULT_TASK_INSTRUCTION = TASK_INSTRUCTIONS[
+    DEFAULT_TASK_DESTINATION
+]
 
 CAMERA_PRIM_PATH = "/World/Camera"
 FRANKA_PRIM_PATH = "/World/Franka"
@@ -108,11 +116,11 @@ HIGH_HOME_POS = np.array([0.4, 0.0, 0.6])
 # 依照目前需求：tray 位於正 Y 側，box 位於負 Y 側。
 # 若實際場景座標不同，只需修改這兩個陣列。
 TRAY_PLACE_POS = np.array(
-    [-0.12, 0.65, 0.45],
+    [-0.12, -0.65, 0.45],
     dtype=np.float64,
 )
 BOX_PLACE_POS = np.array(
-    [-0.12, -0.65, 0.45],
+    [-0.12, 0.65, 0.45],
     dtype=np.float64,
 )
 
@@ -366,8 +374,40 @@ def cache_completed_reply(
 # Command parsing
 # =========================
 
+def parse_task_instruction(
+    instruction: Any,
+) -> Tuple[str, str]:
+    """
+    驗證 Client 傳入的完整任務指令。
+
+    回傳：
+        task_instruction, task_destination
+    """
+    if instruction is None:
+        task_instruction = DEFAULT_TASK_INSTRUCTION
+    elif isinstance(instruction, str):
+        task_instruction = instruction.strip()
+    else:
+        raise ValueError("instruction 必須是字串。")
+
+    for destination, allowed_instruction in TASK_INSTRUCTIONS.items():
+        if task_instruction.lower() == allowed_instruction.lower():
+            return allowed_instruction, destination
+
+    allowed_text = "、".join(
+        repr(value)
+        for value in TASK_INSTRUCTIONS.values()
+    )
+    raise ValueError(
+        f"不支援的 instruction：{task_instruction!r}。"
+        f"只接受 {allowed_text}。"
+    )
+
+
 def parse_action_label(
     action_label: str,
+    task_instruction: str,
+    task_destination: str,
 ) -> Tuple[str, Optional[str]]:
     text = str(action_label).strip()
     lower = text.lower()
@@ -375,15 +415,31 @@ def parse_action_label(
     if not text:
         raise ValueError("action_label 不可為空。")
 
-    if lower == FINISHED_LABEL.lower():
+    expected_finished_label = (
+        f"{task_instruction} finished"
+    )
+
+    # Client 可只送出 finished；Server 依固定 instruction 自動展開。
+    if lower in {
+        "finished",
+        expected_finished_label.lower(),
+    }:
         return "finished", None
 
-    # 單獨輸入 putdown 時，預設放到 tray。
-    if lower in {"putdown", "putdown tray"}:
-        return "putdown_tray", None
+    if lower == "putdown":
+        return f"putdown_{task_destination}", None
 
-    if lower == "putdown box":
-        return "putdown_box", None
+    if lower in {"putdown tray", "putdown box"}:
+        requested_destination = lower.split(maxsplit=1)[1]
+
+        if requested_destination != task_destination:
+            raise ValueError(
+                f"目前 instruction 的目的地為 "
+                f"{task_destination}，不可使用 "
+                f"putdown {requested_destination}。"
+            )
+
+        return f"putdown_{requested_destination}", None
 
     if lower == "home":
         return "home", None
@@ -398,7 +454,7 @@ def parse_action_label(
 
     raise ValueError(
         "不支援的 action_label。只接受 pickup <物品名稱>、"
-        f"putdown tray、putdown box、{FINISHED_LABEL!r} 或 home。"
+        f"putdown {task_destination}、finished 或 home。"
     )
 
 
@@ -538,6 +594,7 @@ def resolve_episode_target_name(
 
 def capture_and_append_jsonl(
     action_label: str,
+    task_instruction: str,
     command_target: Optional[str],
     request_id: str,
 ) -> str:
@@ -575,7 +632,7 @@ def capture_and_append_jsonl(
 
     entry = {
         "image_path": str(final_path),
-        "instruction": TASK_INSTRUCTION,
+        "instruction": task_instruction,
         "annotation": {
             "action_label": action_label,
         },
@@ -1018,6 +1075,7 @@ def start_request(request: Dict[str, Any]) -> None:
 
     request_id_raw = request.get("request_id")
     action_label_raw = request.get("action_label")
+    instruction_raw = request.get("instruction")
 
     if not isinstance(request_id_raw, str) or not request_id_raw.strip():
         send_reply_and_close(
@@ -1056,7 +1114,18 @@ def start_request(request: Dict[str, Any]) -> None:
     action_label = action_label_raw.strip()
 
     try:
-        command, target_name = parse_action_label(action_label)
+        task_instruction, task_destination = (
+            parse_task_instruction(instruction_raw)
+        )
+        command, target_name = parse_action_label(
+            action_label=action_label,
+            task_instruction=task_instruction,
+            task_destination=task_destination,
+        )
+
+        # JSONL 中仍保留完整完成標註，不把簡短的 "finished" 寫入資料集。
+        if command == "finished":
+            action_label = f"{task_instruction} finished"
 
     except ValueError as exc:
         send_reply_and_close(
@@ -1075,6 +1144,7 @@ def start_request(request: Dict[str, Any]) -> None:
 
     log(
         f"[REQUEST] id={request_id} | "
+        f"instruction={task_instruction!r} | "
         f"action_label={action_label!r}"
     )
 
@@ -1103,6 +1173,7 @@ def start_request(request: Dict[str, Any]) -> None:
     try:
         image_path = capture_and_append_jsonl(
             action_label=action_label,
+            task_instruction=task_instruction,
             command_target=target_name,
             request_id=request_id,
         )
@@ -1136,6 +1207,7 @@ def start_request(request: Dict[str, Any]) -> None:
             execution_state="FINISHED",
             command=command,
             action_label=action_label,
+            instruction=task_instruction,
             recorded=True,
             image_path=image_path,
             motion_executed=False,
@@ -1171,6 +1243,7 @@ def start_request(request: Dict[str, Any]) -> None:
                 execution_state="BUILD_FAILED",
                 command=command,
                 action_label=action_label,
+                instruction=task_instruction,
                 message=(
                     "建立 Home 動作失敗："
                     f"{type(exc).__name__}: {exc}"
@@ -1243,6 +1316,7 @@ def start_request(request: Dict[str, Any]) -> None:
                 execution_state="BUILD_FAILED",
                 command=command,
                 action_label=action_label,
+                instruction=task_instruction,
                 message=(
                     "建立機械手臂動作失敗："
                     f"{type(exc).__name__}: {exc}"
@@ -1298,6 +1372,7 @@ def finish_paused() -> None:
         execution_state="PAUSED",
         command=command,
         action_label=action_label,
+        instruction=task_instruction,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1346,6 +1421,7 @@ def finish_completed() -> None:
         execution_state=state,
         command=command,
         action_label=action_label,
+        instruction=task_instruction,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1606,8 +1682,10 @@ def tick_execution() -> None:
 try:
     log("=" * 76)
     log("Isaac Sim Manual Record Server — 2 Second Action Slices")
-    log(f"Fixed instruction : {TASK_INSTRUCTION}")
-    log(f"Finished label    : {FINISHED_LABEL}")
+    log(
+        "Allowed instructions: "
+        f"{list(TASK_INSTRUCTIONS.values())}"
+    )
     log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
     log("Close behavior    : finish gripper closing even after time limit")
     log("Home behavior     : run directly until completion")
