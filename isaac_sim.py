@@ -18,6 +18,8 @@ Isaac Sim 人工標註與 Franka 控制 Server。
    - 一般情況每次執行 2 秒模擬時間。
    - 若 2 秒到達時正在閉合夾爪，會繼續完成整個閉合階段。
    - 夾爪閉合完成後立即暫停，不會直接進入後續抬升。
+   - 一旦完成閉合，暫停、抬升與移動期間都持續維持閉合目標。
+   - 直到 putdown 進入開爪階段，才解除閉合目標。
    - 相同指令從原 generator 暫停位置繼續。
    - 不同指令取消原 generator，開始新動作。
 4. home：
@@ -104,13 +106,15 @@ HIGH_HOME_POS = np.array([0.4, 0.0, 0.6])
 PLACE_POS = np.array([-0.12, -0.65, 0.45])
 
 APPROACH_HEIGHT = 0.10
-GRASP_Z_OFFSET = 0.016
-LIFT_OFFSET = np.array([0.0, -0.05, 0.15])
+GRASP_Z_OFFSET = 0.01
+# 抓取後先垂直抬升，避免水平分量使物體從指間滑落。
+LIFT_OFFSET = np.array([0.0, 0.0, 0.12])
+LIFT_FRAMES = 150
 
 # Franka Panda 兩根手指的關節位置（公尺）。
 # 每根手指 0.04 為張開；0.0 為完全閉合目標。
 GRIPPER_OPEN_POSITIONS = np.array(
-    [0.04, 0.04],
+    [0.035, 0.035],
     dtype=np.float64,
 )
 GRIPPER_CLOSED_POSITIONS = np.array(
@@ -254,6 +258,13 @@ execution_switched = False
 # 兩秒到達時若為 GRIPPER_CLOSING，會繼續到 GRIPPER_CLOSED_BOUNDARY。
 current_motion_phase = "IDLE"
 slice_time_expired = False
+
+# 持續夾持目標。
+# 一旦 close_gripper() 設為閉合，即使 generator 暫停或手臂正在移動，
+# 每一個 simulation step 都會重新送出閉合位置，直到 open_gripper()。
+desired_gripper_positions: Optional[np.ndarray] = (
+    GRIPPER_OPEN_POSITIONS.copy()
+)
 
 # 單次 TCP 連線狀態。
 client_conn: Optional[socket.socket] = None
@@ -520,6 +531,8 @@ def capture_and_append_jsonl(
     JSONL 欄位與原格式完全相同。
     """
     for _ in range(CAPTURE_SETTLE_FRAMES):
+        # 拍照等待期間若正在拿著物體，仍持續維持夾爪閉合。
+        maintain_gripper_target()
         world.step(render=True)
 
     rgba = camera.get_rgba()
@@ -573,12 +586,16 @@ def capture_and_append_jsonl(
 
 def hold_current_pose() -> None:
     """
-    將目前關節位置設為新的目標，讓兩秒到達後停在目前姿態。
+    暫停手臂姿態，但不要把夾爪改成當下的半閉合位置。
+
+    Franka 一般包含 7 個手臂關節與 2 個手指關節。此處優先只
+    Hold 手臂關節；夾爪則由 maintain_gripper_target() 持續控制。
     """
     joint_positions = franka.get_joint_positions()
 
     if joint_positions is None:
         log("[HOLD] 無法取得目前關節位置，略過 Hold。")
+        maintain_gripper_target()
         return
 
     joint_positions = np.asarray(
@@ -586,13 +603,43 @@ def hold_current_pose() -> None:
         dtype=np.float64,
     )
 
-    hold_action = ArticulationAction(
-        joint_positions=joint_positions,
-        joint_velocities=np.zeros_like(joint_positions),
-    )
+    # 最後兩個 DOF 視為手指關節。
+    arm_dof_count = max(0, joint_positions.size - 2)
 
-    franka.apply_action(hold_action)
-    debug("[HOLD] Holding current joint positions.")
+    try:
+        if arm_dof_count > 0:
+            arm_indices = np.arange(
+                arm_dof_count,
+                dtype=np.int64,
+            )
+
+            hold_action = ArticulationAction(
+                joint_positions=joint_positions[:arm_dof_count].copy(),
+                joint_velocities=np.zeros(
+                    arm_dof_count,
+                    dtype=np.float64,
+                ),
+                joint_indices=arm_indices,
+            )
+        else:
+            hold_action = ArticulationAction(
+                joint_positions=joint_positions.copy(),
+                joint_velocities=np.zeros_like(joint_positions),
+            )
+
+        franka.apply_action(hold_action)
+
+    except TypeError:
+        # 相容部分不支援 joint_indices 的舊版 Isaac Sim。
+        # 即使暫時對全部關節 Hold，後面也會立刻重新送出夾爪目標。
+        fallback_action = ArticulationAction(
+            joint_positions=joint_positions.copy(),
+            joint_velocities=np.zeros_like(joint_positions),
+        )
+        franka.apply_action(fallback_action)
+
+    maintain_gripper_target()
+    debug("[HOLD] Arm pose held; gripper target preserved.")
 
 
 # =========================
@@ -628,6 +675,40 @@ def apply_gripper_target(target_positions: np.ndarray) -> None:
         joint_positions=target_positions.copy(),
     )
     franka.gripper.apply_action(gripper_action)
+
+
+def set_desired_gripper_positions(
+    target_positions: np.ndarray,
+) -> None:
+    """設定之後每一個 simulation step 都要維持的夾爪目標。"""
+    global desired_gripper_positions
+
+    target_positions = np.asarray(
+        target_positions,
+        dtype=np.float64,
+    )
+
+    if target_positions.shape != (2,):
+        raise ValueError(
+            "desired gripper target 必須包含兩個手指關節位置，"
+            f"目前 shape={target_positions.shape}"
+        )
+
+    desired_gripper_positions = target_positions.copy()
+    apply_gripper_target(desired_gripper_positions)
+
+
+def maintain_gripper_target() -> None:
+    """
+    持續施加夾爪目標。
+
+    即使 pickup generator 暫停、手臂正在抬升或移動到放置區，
+    只要 desired_gripper_positions 仍是 CLOSED，就會持續夾緊。
+    """
+    if desired_gripper_positions is None:
+        return
+
+    apply_gripper_target(desired_gripper_positions)
 
 
 def get_finger_positions() -> Optional[np.ndarray]:
@@ -668,12 +749,15 @@ def open_gripper(
     frames: int = GRIPPER_OPEN_FRAMES,
 ) -> Generator[str, None, None]:
     """
-    每一幀送出張開目標。
+    設定持續張開目標。
 
-    張開階段仍受一般兩秒限制。
+    一旦進入此階段，之後每個 simulation step 都會維持 OPEN，
+    直到下一次 close_gripper()。
     """
+    set_desired_gripper_positions(GRIPPER_OPEN_POSITIONS)
+
     for frame_index in range(frames):
-        apply_gripper_target(GRIPPER_OPEN_POSITIONS)
+        maintain_gripper_target()
 
         if DEBUG and frame_index % 10 == 0:
             finger_positions = get_finger_positions()
@@ -686,7 +770,6 @@ def open_gripper(
 
         yield set_motion_phase("GRIPPER_OPENING")
 
-    # 階段邊界。這一個 yield 不會送出新的手臂移動命令。
     yield set_motion_phase("GRIPPER_OPENED_BOUNDARY")
 
 
@@ -694,13 +777,15 @@ def close_gripper(
     frames: int = GRIPPER_CLOSE_FRAMES,
 ) -> Generator[str, None, None]:
     """
-    每一幀重新送出完全閉合目標。
+    設定持續閉合目標。
 
-    若兩秒在此階段到達，Server 不會暫停，而會繼續執行到
-    GRIPPER_CLOSED_BOUNDARY，再立即暫停。
+    閉合完成後不會解除此目標。暫停、抬升、移動到放置位置期間
+    都會持續送出 CLOSED target，直到 putdown 執行 open_gripper()。
     """
+    set_desired_gripper_positions(GRIPPER_CLOSED_POSITIONS)
+
     for frame_index in range(frames):
-        apply_gripper_target(GRIPPER_CLOSED_POSITIONS)
+        maintain_gripper_target()
 
         if DEBUG and frame_index % 10 == 0:
             finger_positions = get_finger_positions()
@@ -713,8 +798,7 @@ def close_gripper(
 
         yield set_motion_phase("GRIPPER_CLOSING")
 
-    # 重要：先產生一個明確的閉合完成邊界。
-    # tick_execution() 可在這裡暫停，避免同一個 next() 直接開始抬升。
+    # 只代表閉合階段完成；desired target 仍保持 CLOSED。
     yield set_motion_phase("GRIPPER_CLOSED_BOUNDARY")
 
 
@@ -771,6 +855,7 @@ def pick_sequence(
     # 只有下一次相同 pickup 指令續跑後，才會從此處開始抬升。
     yield from move_to(
         lift_position,
+        frames=LIFT_FRAMES,
         phase="LIFTING_OBJECT",
     )
 
@@ -1491,6 +1576,9 @@ try:
     log("Home behavior     : run directly until completion")
     log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
     log(f"Gripper close pos : {GRIPPER_CLOSED_POSITIONS}")
+    log("Grip hold         : CLOSED target maintained during pause/lift/move")
+    log(f"Lift offset       : {LIFT_OFFSET}")
+    log(f"Lift frames       : {LIFT_FRAMES}")
     log(f"Image directory  : {SAVE_DIR}")
     log(f"JSONL file       : {JSONL_PATH}")
     log("=" * 76)
@@ -1499,8 +1587,14 @@ try:
         accept_client_if_idle()
         read_single_request_if_available()
 
-        world.step(render=True)
+        # 先更新本幀的手臂與夾爪控制命令。
         tick_execution()
+
+        # 不論 generator 是否暫停，夾爪都持續維持目標。
+        maintain_gripper_target()
+
+        # 套用本幀控制命令並推進物理模擬。
+        world.step(render=True)
 
 except KeyboardInterrupt:
     log("[MAIN] Interrupted by user.")
