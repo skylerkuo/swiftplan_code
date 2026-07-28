@@ -105,8 +105,20 @@ APPROACH_HEIGHT = 0.10
 GRASP_Z_OFFSET = 0.016
 LIFT_OFFSET = np.array([0.0, -0.05, 0.15])
 
+# Franka Panda 兩根手指的目標位置（單位：公尺）。
+# 0.04 表示張開；0.0 表示完全閉合。
+GRIPPER_OPEN_POSITIONS = np.array(
+    [0.04, 0.04],
+    dtype=np.float64,
+)
+GRIPPER_CLOSED_POSITIONS = np.array(
+    [0.0, 0.0],
+    dtype=np.float64,
+)
+
 MOVE_FRAMES = 100
-GRIPPER_CLOSE_FRAMES = 50
+# 延長閉合維持時間，並且每一幀重新送出閉合目標。
+GRIPPER_CLOSE_FRAMES = 90
 GRIPPER_OPEN_FRAMES = 30
 HOME_FRAMES = 30
 CAMERA_WARMUP_FRAMES = 30
@@ -596,21 +608,96 @@ def move_to(
         yield
 
 
+def apply_gripper_target(
+    target_positions: np.ndarray,
+) -> None:
+    """
+    直接將兩根手指送到指定位置。
+
+    每個 simulation step 都重新送出目標，避免兩秒暫停時
+    hold_current_pose() 將夾爪停在半閉合位置後，續跑時無法繼續閉合。
+    """
+    target_positions = np.asarray(
+        target_positions,
+        dtype=np.float64,
+    )
+
+    if target_positions.shape != (2,):
+        raise ValueError(
+            "Gripper target 必須包含兩個手指關節位置，"
+            f"目前 shape={target_positions.shape}"
+        )
+
+    action = ArticulationAction(
+        joint_positions=target_positions.copy(),
+    )
+    franka.gripper.apply_action(action)
+
+
+def get_finger_positions() -> Optional[np.ndarray]:
+    """讀取 Franka 最後兩個手指關節的位置，僅用於除錯。"""
+    joint_positions = franka.get_joint_positions()
+
+    if joint_positions is None:
+        return None
+
+    joint_positions = np.asarray(
+        joint_positions,
+        dtype=np.float64,
+    )
+
+    if joint_positions.size < 2:
+        return None
+
+    return joint_positions[-2:].copy()
+
+
 def open_gripper(
     frames: int = GRIPPER_OPEN_FRAMES,
 ) -> Generator[None, None, None]:
-    franka.gripper.open()
+    """
+    每一幀重新送出完全張開位置。
 
-    for _ in range(frames):
+    即使動作在兩秒邊界暫停，下一次相同指令續跑時，
+    generator 仍會持續將手指送往張開目標。
+    """
+    for frame_index in range(frames):
+        apply_gripper_target(GRIPPER_OPEN_POSITIONS)
+
+        if DEBUG and frame_index % 10 == 0:
+            finger_positions = get_finger_positions()
+            if finger_positions is not None:
+                debug(
+                    "[GRIPPER OPEN] "
+                    f"frame={frame_index}, "
+                    f"positions={finger_positions}"
+                )
+
         yield
 
 
 def close_gripper(
     frames: int = GRIPPER_CLOSE_FRAMES,
 ) -> Generator[None, None, None]:
-    franka.gripper.close()
+    """
+    每一幀重新送出完全閉合位置 [0.0, 0.0]。
 
-    for _ in range(frames):
+    原本只在進入函式時呼叫一次 close()；若兩秒暫停發生在
+    閉合途中，hold_current_pose() 會固定半閉合位置。此版本
+    會在續跑時繼續送出閉合目標，直到完成所有閉合 frames。
+    """
+    for frame_index in range(frames):
+        apply_gripper_target(GRIPPER_CLOSED_POSITIONS)
+
+        if DEBUG and frame_index % 10 == 0:
+            finger_positions = get_finger_positions()
+            if finger_positions is not None:
+                debug(
+                    "[GRIPPER CLOSE] "
+                    f"frame={frame_index}, "
+                    f"positions={finger_positions}"
+                )
+
         yield
 
 
@@ -627,10 +714,8 @@ def go_home(
         franka.apply_action(action)
         yield
 
-    franka.gripper.open()
-
-    for _ in range(frames):
-        yield
+    # Home 完成後使用同一套逐幀控制方式打開夾爪。
+    yield from open_gripper(frames)
 
 
 def pick_sequence(
@@ -1325,6 +1410,9 @@ try:
     log(f"Finished label    : {FINISHED_LABEL}")
     log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
     log("Home behavior     : run directly until completion")
+    log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
+    log(f"Gripper close pos : {GRIPPER_CLOSED_POSITIONS}")
+    log(f"Gripper close frames: {GRIPPER_CLOSE_FRAMES}")
     log(f"Image directory  : {SAVE_DIR}")
     log(f"JSONL file       : {JSONL_PATH}")
     log("=" * 76)
