@@ -270,6 +270,12 @@ execution_mode: Optional[str] = None  # "SLICE" 或 "FULL"
 execution_steps_remaining = 0
 execution_request_id: Optional[str] = None
 execution_image_path: Optional[str] = None
+
+# 保存目前非同步執行中的完整任務指令。
+# start_request() 結束後，finish_paused() / finish_completed() /
+# fail_execution() 仍需要使用此值。
+execution_task_instruction: Optional[str] = None
+
 execution_continued = False
 execution_switched = False
 
@@ -1026,6 +1032,7 @@ def clear_execution_state() -> None:
     global execution_steps_remaining
     global execution_request_id
     global execution_image_path
+    global execution_task_instruction
     global execution_continued
     global execution_switched
     global slice_time_expired
@@ -1035,6 +1042,7 @@ def clear_execution_state() -> None:
     execution_steps_remaining = 0
     execution_request_id = None
     execution_image_path = None
+    execution_task_instruction = None
     execution_continued = False
     execution_switched = False
     slice_time_expired = False
@@ -1067,6 +1075,7 @@ def start_request(request: Dict[str, Any]) -> None:
     global execution_steps_remaining
     global execution_request_id
     global execution_image_path
+    global execution_task_instruction
     global execution_continued
     global execution_switched
     global slice_time_expired
@@ -1267,6 +1276,7 @@ def start_request(request: Dict[str, Any]) -> None:
         execution_steps_remaining = 0
         execution_request_id = request_id
         execution_image_path = image_path
+        execution_task_instruction = task_instruction
         execution_continued = False
         execution_switched = switched
         slice_time_expired = False
@@ -1341,6 +1351,7 @@ def start_request(request: Dict[str, Any]) -> None:
     execution_steps_remaining = ACTION_SLICE_STEPS
     execution_request_id = request_id
     execution_image_path = image_path
+    execution_task_instruction = task_instruction
     execution_continued = continued
     execution_switched = switched
     slice_time_expired = False
@@ -1356,9 +1367,11 @@ def finish_paused() -> None:
     assert execution_request_id is not None
     assert active_command is not None
     assert active_action_label is not None
+    assert execution_task_instruction is not None
 
     request_id = execution_request_id
     image_path = execution_image_path
+    instruction = execution_task_instruction
     command = active_command
     action_label = active_action_label
     continued = execution_continued
@@ -1372,7 +1385,7 @@ def finish_paused() -> None:
         execution_state="PAUSED",
         command=command,
         action_label=action_label,
-        instruction=task_instruction,
+        instruction=instruction,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1394,9 +1407,11 @@ def finish_completed() -> None:
     assert execution_request_id is not None
     assert active_command is not None
     assert active_action_label is not None
+    assert execution_task_instruction is not None
 
     request_id = execution_request_id
     image_path = execution_image_path
+    instruction = execution_task_instruction
     command = active_command
     action_label = active_action_label
     continued = execution_continued
@@ -1421,7 +1436,7 @@ def finish_completed() -> None:
         execution_state=state,
         command=command,
         action_label=action_label,
-        instruction=task_instruction,
+        instruction=instruction,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1442,6 +1457,7 @@ def finish_completed() -> None:
 def fail_execution(exc: BaseException) -> None:
     request_id = execution_request_id
     image_path = execution_image_path
+    instruction = execution_task_instruction
     command = active_command
     action_label = active_action_label
 
@@ -1456,6 +1472,7 @@ def fail_execution(exc: BaseException) -> None:
         execution_state="FAILED",
         command=command,
         action_label=action_label,
+        instruction=instruction,
         message=(
             "機械手臂動作失敗："
             f"{type(exc).__name__}: {exc}"
