@@ -20,7 +20,6 @@ Isaac Sim 外部人工標註控制端。
     putdown tray
     putdown box
     finished
-    tidy up the properties finished
     home
     retry
     help
@@ -51,7 +50,18 @@ CONNECT_TIMEOUT_SECONDS = 10.0
 REPLY_TIMEOUT_SECONDS = 300.0
 MAX_REPLY_BYTES = 1024 * 1024
 
-TASK_INSTRUCTION = "tidy up the properties"
+# 本次資料收集任務的目的地，只能設定為 "tray" 或 "box"。
+TASK_DESTINATION = "tray"
+
+if TASK_DESTINATION not in {"tray", "box"}:
+    raise ValueError(
+        'TASK_DESTINATION 只能是 "tray" 或 "box"。'
+    )
+
+# 不要在字串尾端加空白。
+TASK_INSTRUCTION = (
+    f"tidy up the properties into the {TASK_DESTINATION}"
+)
 FINISHED_LABEL = f"{TASK_INSTRUCTION} finished"
 
 
@@ -63,11 +73,13 @@ FINISHED_LABEL = f"{TASK_INSTRUCTION} finished"
 class RequestPayload:
     request_id: str
     action_label: str
+    instruction: str
 
     def to_dict(self) -> Dict[str, str]:
         return {
             "request_id": self.request_id,
             "action_label": self.action_label,
+            "instruction": self.instruction,
         }
 
 
@@ -89,16 +101,25 @@ def normalize_manual_label(raw_text: str) -> str:
         raise ValueError("指令不可為空。")
 
     if lower == "finished":
-        return FINISHED_LABEL
+        return "finished"
 
+    # 仍保留完整句子的相容性，但實際送給 Server 時統一簡化成 finished。
     if lower == FINISHED_LABEL.lower():
-        return FINISHED_LABEL
+        return "finished"
 
-    if lower in {"putdown", "putdown tray"}:
-        return "putdown tray"
+    if lower == "putdown":
+        return f"putdown {TASK_DESTINATION}"
 
-    if lower == "putdown box":
-        return "putdown box"
+    if lower in {"putdown tray", "putdown box"}:
+        requested_destination = lower.split(maxsplit=1)[1]
+
+        if requested_destination != TASK_DESTINATION:
+            raise ValueError(
+                f"目前任務目的地為 {TASK_DESTINATION}，"
+                f"不可輸入 putdown {requested_destination}。"
+            )
+
+        return f"putdown {requested_destination}"
 
     if lower == "home":
         return "home"
@@ -203,11 +224,9 @@ def print_help() -> None:
     print(
         "\n可用指令：\n"
         "  pickup <物品名稱>                 記錄資料，執行或續跑 pickup 2 秒\n"
-        "  putdown                            預設等同 putdown tray\n"
-        "  putdown tray                       記錄資料，放到 tray\n"
-        "  putdown box                        記錄資料，放到 box\n"
-        "  finished                           記錄完整 finished 標註，不移動手臂\n"
-        f"  {FINISHED_LABEL}   與 finished 相同\n"
+        f"  putdown                            預設放到 {TASK_DESTINATION}\n"
+        f"  putdown {TASK_DESTINATION:<25} 記錄資料並放到目前目的地\n"
+        "  finished                           結束任務並記錄完整完成標註\n"
         "  home                               記錄資料，直接執行到 Home 完成\n"
         "  retry                              重送相同 request_id\n"
         "  help                               顯示說明\n"
@@ -272,8 +291,11 @@ def main() -> int:
     print("=" * 72)
     print("Isaac Sim Manual Annotation Client — 2 Second Action Slices")
     print(f"Server: {HOST}:{PORT}")
+    print(f"Task destination: {TASK_DESTINATION}")
     print(f"Fixed instruction: {TASK_INSTRUCTION}")
-    print("pickup / putdown tray / putdown box 每次執行 2 秒。")
+    print(
+        f"pickup / putdown {TASK_DESTINATION} 每次執行 2 秒。"
+    )
     print("home 直接執行到完成。")
     print("每一筆新指令都記錄一筆資料。")
     print("=" * 72)
@@ -327,13 +349,15 @@ def main() -> int:
             payload = RequestPayload(
                 request_id=uuid.uuid4().hex,
                 action_label=action_label,
+                instruction=TASK_INSTRUCTION,
             )
             last_payload = payload
             last_action_label = action_label
 
         print(
             f"\n[SEND] request_id={payload.request_id}, "
-            f"action_label={payload.action_label!r}"
+            f"action_label={payload.action_label!r}, "
+            f"instruction={payload.instruction!r}"
         )
 
         try:
