@@ -17,6 +17,8 @@ Isaac Sim 外部人工標註控制端。
 可用指令：
     pickup apple
     putdown
+    putdown tray
+    putdown box
     finished
     tidy up the properties finished
     home
@@ -92,8 +94,11 @@ def normalize_manual_label(raw_text: str) -> str:
     if lower == FINISHED_LABEL.lower():
         return FINISHED_LABEL
 
-    if lower == "putdown":
-        return "putdown"
+    if lower in {"putdown", "putdown tray"}:
+        return "putdown tray"
+
+    if lower == "putdown box":
+        return "putdown box"
 
     if lower == "home":
         return "home"
@@ -110,8 +115,8 @@ def normalize_manual_label(raw_text: str) -> str:
         return f"pickup {target_name}"
 
     raise ValueError(
-        "不支援的指令。請輸入 pickup <物品名稱>、putdown、"
-        "finished 或 home。"
+        "不支援的指令。請輸入 pickup <物品名稱>、putdown tray、"
+        "putdown box、finished 或 home。"
     )
 
 
@@ -198,7 +203,9 @@ def print_help() -> None:
     print(
         "\n可用指令：\n"
         "  pickup <物品名稱>                 記錄資料，執行或續跑 pickup 2 秒\n"
-        "  putdown                            記錄資料，執行或續跑 putdown 2 秒\n"
+        "  putdown                            預設等同 putdown tray\n"
+        "  putdown tray                       記錄資料，放到 tray\n"
+        "  putdown box                        記錄資料，放到 box\n"
         "  finished                           記錄完整 finished 標註，不移動手臂\n"
         f"  {FINISHED_LABEL}   與 finished 相同\n"
         "  home                               記錄資料，直接執行到 Home 完成\n"
@@ -266,7 +273,8 @@ def main() -> int:
     print("Isaac Sim Manual Annotation Client — 2 Second Action Slices")
     print(f"Server: {HOST}:{PORT}")
     print(f"Fixed instruction: {TASK_INSTRUCTION}")
-    print("pickup / putdown 每次執行 2 秒；home 直接執行到完成。")
+    print("pickup / putdown tray / putdown box 每次執行 2 秒。")
+    print("home 直接執行到完成。")
     print("每一筆新指令都記錄一筆資料。")
     print("=" * 72)
     print_help()
