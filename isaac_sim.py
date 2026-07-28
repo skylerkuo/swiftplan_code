@@ -15,7 +15,9 @@ Isaac Sim 人工標註與 Franka 控制 Server。
        }
    }
 3. pickup / putdown：
-   - 每次最多執行 2 秒模擬時間。
+   - 一般情況每次執行 2 秒模擬時間。
+   - 若 2 秒到達時正在閉合夾爪，會繼續完成整個閉合階段。
+   - 夾爪閉合完成後立即暫停，不會直接進入後續抬升。
    - 相同指令從原 generator 暫停位置繼續。
    - 不同指令取消原 generator，開始新動作。
 4. home：
@@ -105,8 +107,8 @@ APPROACH_HEIGHT = 0.10
 GRASP_Z_OFFSET = 0.016
 LIFT_OFFSET = np.array([0.0, -0.05, 0.15])
 
-# Franka Panda 兩根手指的目標位置（單位：公尺）。
-# 0.04 表示張開；0.0 表示完全閉合。
+# Franka Panda 兩根手指的關節位置（公尺）。
+# 每根手指 0.04 為張開；0.0 為完全閉合目標。
 GRIPPER_OPEN_POSITIONS = np.array(
     [0.04, 0.04],
     dtype=np.float64,
@@ -117,7 +119,6 @@ GRIPPER_CLOSED_POSITIONS = np.array(
 )
 
 MOVE_FRAMES = 100
-# 延長閉合維持時間，並且每一幀重新送出閉合目標。
 GRIPPER_CLOSE_FRAMES = 90
 GRIPPER_OPEN_FRAMES = 30
 HOME_FRAMES = 30
@@ -248,6 +249,11 @@ execution_request_id: Optional[str] = None
 execution_image_path: Optional[str] = None
 execution_continued = False
 execution_switched = False
+
+# 目前 generator 正在執行的細部階段。
+# 兩秒到達時若為 GRIPPER_CLOSING，會繼續到 GRIPPER_CLOSED_BOUNDARY。
+current_motion_phase = "IDLE"
+slice_time_expired = False
 
 # 單次 TCP 連線狀態。
 client_conn: Optional[socket.socket] = None
@@ -593,29 +599,19 @@ def hold_current_pose() -> None:
 # Franka generators
 # =========================
 
-def move_to(
-    target_position: np.ndarray,
-    frames: int = MOVE_FRAMES,
-) -> Generator[None, None, None]:
-    rmpflow_controller.reset()
-
-    for _ in range(frames):
-        action = rmpflow_controller.forward(
-            target_end_effector_position=target_position,
-            target_end_effector_orientation=VERTICAL_Q,
-        )
-        franka.apply_action(action)
-        yield
+def set_motion_phase(phase: str) -> str:
+    """更新並回傳目前細部動作階段。"""
+    global current_motion_phase
+    current_motion_phase = phase
+    return phase
 
 
-def apply_gripper_target(
-    target_positions: np.ndarray,
-) -> None:
+def apply_gripper_target(target_positions: np.ndarray) -> None:
     """
-    直接將兩根手指送到指定位置。
+    每個 simulation step 都重新送出夾爪目標。
 
-    每個 simulation step 都重新送出目標，避免兩秒暫停時
-    hold_current_pose() 將夾爪停在半閉合位置後，續跑時無法繼續閉合。
+    這可避免兩秒暫停時 hold_current_pose() 固定半閉合位置後，
+    下一次續跑卻沒有重新送出閉合命令。
     """
     target_positions = np.asarray(
         target_positions,
@@ -624,18 +620,18 @@ def apply_gripper_target(
 
     if target_positions.shape != (2,):
         raise ValueError(
-            "Gripper target 必須包含兩個手指關節位置，"
+            "夾爪目標必須包含兩個手指關節位置，"
             f"目前 shape={target_positions.shape}"
         )
 
-    action = ArticulationAction(
+    gripper_action = ArticulationAction(
         joint_positions=target_positions.copy(),
     )
-    franka.gripper.apply_action(action)
+    franka.gripper.apply_action(gripper_action)
 
 
 def get_finger_positions() -> Optional[np.ndarray]:
-    """讀取 Franka 最後兩個手指關節的位置，僅用於除錯。"""
+    """讀取最後兩個手指關節位置，供除錯顯示。"""
     joint_positions = franka.get_joint_positions()
 
     if joint_positions is None:
@@ -652,14 +648,29 @@ def get_finger_positions() -> Optional[np.ndarray]:
     return joint_positions[-2:].copy()
 
 
+def move_to(
+    target_position: np.ndarray,
+    frames: int = MOVE_FRAMES,
+    phase: str = "ARM_MOVING",
+) -> Generator[str, None, None]:
+    rmpflow_controller.reset()
+
+    for _ in range(frames):
+        action = rmpflow_controller.forward(
+            target_end_effector_position=target_position,
+            target_end_effector_orientation=VERTICAL_Q,
+        )
+        franka.apply_action(action)
+        yield set_motion_phase(phase)
+
+
 def open_gripper(
     frames: int = GRIPPER_OPEN_FRAMES,
-) -> Generator[None, None, None]:
+) -> Generator[str, None, None]:
     """
-    每一幀重新送出完全張開位置。
+    每一幀送出張開目標。
 
-    即使動作在兩秒邊界暫停，下一次相同指令續跑時，
-    generator 仍會持續將手指送往張開目標。
+    張開階段仍受一般兩秒限制。
     """
     for frame_index in range(frames):
         apply_gripper_target(GRIPPER_OPEN_POSITIONS)
@@ -673,18 +684,20 @@ def open_gripper(
                     f"positions={finger_positions}"
                 )
 
-        yield
+        yield set_motion_phase("GRIPPER_OPENING")
+
+    # 階段邊界。這一個 yield 不會送出新的手臂移動命令。
+    yield set_motion_phase("GRIPPER_OPENED_BOUNDARY")
 
 
 def close_gripper(
     frames: int = GRIPPER_CLOSE_FRAMES,
-) -> Generator[None, None, None]:
+) -> Generator[str, None, None]:
     """
-    每一幀重新送出完全閉合位置 [0.0, 0.0]。
+    每一幀重新送出完全閉合目標。
 
-    原本只在進入函式時呼叫一次 close()；若兩秒暫停發生在
-    閉合途中，hold_current_pose() 會固定半閉合位置。此版本
-    會在續跑時繼續送出閉合目標，直到完成所有閉合 frames。
+    若兩秒在此階段到達，Server 不會暫停，而會繼續執行到
+    GRIPPER_CLOSED_BOUNDARY，再立即暫停。
     """
     for frame_index in range(frames):
         apply_gripper_target(GRIPPER_CLOSED_POSITIONS)
@@ -698,30 +711,29 @@ def close_gripper(
                     f"positions={finger_positions}"
                 )
 
-        yield
+        yield set_motion_phase("GRIPPER_CLOSING")
+
+    # 重要：先產生一個明確的閉合完成邊界。
+    # tick_execution() 可在這裡暫停，避免同一個 next() 直接開始抬升。
+    yield set_motion_phase("GRIPPER_CLOSED_BOUNDARY")
 
 
 def go_home(
     frames: int = HOME_FRAMES,
-) -> Generator[None, None, None]:
-    rmpflow_controller.reset()
+) -> Generator[str, None, None]:
+    yield from move_to(
+        HIGH_HOME_POS,
+        frames=frames,
+        phase="HOME_MOVING",
+    )
 
-    for _ in range(frames):
-        action = rmpflow_controller.forward(
-            target_end_effector_position=HIGH_HOME_POS,
-            target_end_effector_orientation=VERTICAL_Q,
-        )
-        franka.apply_action(action)
-        yield
-
-    # Home 完成後使用同一套逐幀控制方式打開夾爪。
     yield from open_gripper(frames)
 
 
 def pick_sequence(
     target_name: str,
     target_position: np.ndarray,
-) -> Generator[None, None, None]:
+) -> Generator[str, None, None]:
     grasp_offset = TARGET_GRASP_OFFSETS.get(
         target_name.lower(),
         np.zeros(3, dtype=np.float64),
@@ -743,14 +755,31 @@ def pick_sequence(
     debug(f"grasp_position={grasp_position}")
 
     yield from open_gripper()
-    yield from move_to(approach_position)
-    yield from move_to(grasp_position)
+
+    yield from move_to(
+        approach_position,
+        phase="APPROACHING_TARGET",
+    )
+
+    yield from move_to(
+        grasp_position,
+        phase="DESCENDING_TO_GRASP",
+    )
+
     yield from close_gripper()
-    yield from move_to(lift_position)
+
+    # 只有下一次相同 pickup 指令續跑後，才會從此處開始抬升。
+    yield from move_to(
+        lift_position,
+        phase="LIFTING_OBJECT",
+    )
 
 
-def place_sequence() -> Generator[None, None, None]:
-    yield from move_to(PLACE_POS)
+def place_sequence() -> Generator[str, None, None]:
+    yield from move_to(
+        PLACE_POS,
+        phase="MOVING_TO_PLACE",
+    )
     yield from open_gripper()
     yield from go_home()
 
@@ -758,7 +787,7 @@ def place_sequence() -> Generator[None, None, None]:
 def build_new_task(
     command: str,
     target_name: Optional[str],
-) -> Generator[None, None, None]:
+) -> Generator[str, None, None]:
     global current_target_name
     global last_picked_target_name
 
@@ -821,6 +850,7 @@ def clear_execution_state() -> None:
     global execution_image_path
     global execution_continued
     global execution_switched
+    global slice_time_expired
 
     execution_running = False
     execution_mode = None
@@ -829,6 +859,7 @@ def clear_execution_state() -> None:
     execution_image_path = None
     execution_continued = False
     execution_switched = False
+    slice_time_expired = False
 
 
 def cancel_active_action() -> None:
@@ -860,6 +891,7 @@ def start_request(request: Dict[str, Any]) -> None:
     global execution_image_path
     global execution_continued
     global execution_switched
+    global slice_time_expired
 
     global current_target_name
 
@@ -1043,6 +1075,7 @@ def start_request(request: Dict[str, Any]) -> None:
         execution_image_path = image_path
         execution_continued = False
         execution_switched = switched
+        slice_time_expired = False
 
         log("[EXECUTION] Home will run directly until completion.")
         return
@@ -1114,6 +1147,7 @@ def start_request(request: Dict[str, Any]) -> None:
     execution_image_path = image_path
     execution_continued = continued
     execution_switched = switched
+    slice_time_expired = False
 
     log(
         f"[EXECUTION] Start 2-second slice: "
@@ -1377,23 +1411,67 @@ def read_single_request_if_available() -> None:
 # =========================
 
 def tick_execution() -> None:
+    """
+    執行一個 generator step。
+
+    一般階段：
+        2 秒到達後立即暫停。
+
+    夾爪閉合階段：
+        即使超過 2 秒，也繼續執行到 GRIPPER_CLOSED_BOUNDARY，
+        然後立即暫停，不會開始抬升。
+    """
     global execution_steps_remaining
+    global slice_time_expired
 
     if not execution_running or active_task is None:
         return
 
     try:
-        next(active_task)
+        phase = next(active_task)
 
-        if execution_mode == "SLICE":
+        if execution_mode != "SLICE":
+            return
+
+        if not slice_time_expired:
             execution_steps_remaining -= 1
 
             if execution_steps_remaining <= 0:
+                slice_time_expired = True
                 log(
-                    f"[EXECUTION] Paused after "
-                    f"{ACTION_SLICE_SECONDS:.1f} simulated seconds."
+                    f"[EXECUTION] Reached "
+                    f"{ACTION_SLICE_SECONDS:.1f} simulated seconds "
+                    f"during phase={phase}."
                 )
-                finish_paused()
+
+        if not slice_time_expired:
+            return
+
+        # 時間已到，但正在閉合：允許閉合階段完整跑完。
+        if phase == "GRIPPER_CLOSING":
+            debug(
+                "[EXECUTION] Time expired during gripper closing; "
+                "continue until fully closed."
+            )
+            return
+
+        # close_gripper() 額外產生此邊界，確保閉合完成後
+        # 暫停於此，不會在同一個 next() 中直接開始抬升。
+        if phase == "GRIPPER_CLOSED_BOUNDARY":
+            log(
+                "[EXECUTION] Gripper closing completed after time limit; "
+                "pause before lifting."
+            )
+            finish_paused()
+            return
+
+        # 其他任何階段在時間到達後照常暫停。
+        log(
+            f"[EXECUTION] Paused after "
+            f"{ACTION_SLICE_SECONDS:.1f} simulated seconds, "
+            f"phase={phase}."
+        )
+        finish_paused()
 
     except StopIteration:
         log("[EXECUTION] Action completed.")
@@ -1409,10 +1487,10 @@ try:
     log(f"Fixed instruction : {TASK_INSTRUCTION}")
     log(f"Finished label    : {FINISHED_LABEL}")
     log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
+    log("Close behavior    : finish gripper closing even after time limit")
     log("Home behavior     : run directly until completion")
     log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
     log(f"Gripper close pos : {GRIPPER_CLOSED_POSITIONS}")
-    log(f"Gripper close frames: {GRIPPER_CLOSE_FRAMES}")
     log(f"Image directory  : {SAVE_DIR}")
     log(f"JSONL file       : {JSONL_PATH}")
     log("=" * 76)
