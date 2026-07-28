@@ -14,7 +14,7 @@ Isaac Sim 人工標註與 Franka 控制 Server。
            "action_label": "pickup apple"
        }
    }
-3. pickup / putdown：
+3. pickup / putdown tray / putdown box：
    - 一般情況每次執行 2 秒模擬時間。
    - 若 2 秒到達時正在閉合夾爪，會繼續完成整個閉合階段。
    - 夾爪閉合完成後立即暫停，不會直接進入後續抬升。
@@ -103,7 +103,18 @@ TARGET_GRASP_OFFSETS: Dict[str, np.ndarray] = {
 
 VERTICAL_Q = np.array([0.0, 1.0, 0.0, 0.0])
 HIGH_HOME_POS = np.array([0.4, 0.0, 0.6])
-PLACE_POS = np.array([-0.12, -0.65, 0.45])
+
+# 兩個固定放置位置。
+# 依照目前需求：tray 位於正 Y 側，box 位於負 Y 側。
+# 若實際場景座標不同，只需修改這兩個陣列。
+TRAY_PLACE_POS = np.array(
+    [-0.12, 0.65, 0.45],
+    dtype=np.float64,
+)
+BOX_PLACE_POS = np.array(
+    [-0.12, -0.65, 0.45],
+    dtype=np.float64,
+)
 
 APPROACH_HEIGHT = 0.10
 GRASP_Z_OFFSET = 0.01
@@ -367,8 +378,12 @@ def parse_action_label(
     if lower == FINISHED_LABEL.lower():
         return "finished", None
 
-    if lower == "putdown":
-        return "putdown", None
+    # 單獨輸入 putdown 時，預設放到 tray。
+    if lower in {"putdown", "putdown tray"}:
+        return "putdown_tray", None
+
+    if lower == "putdown box":
+        return "putdown_box", None
 
     if lower == "home":
         return "home", None
@@ -383,7 +398,7 @@ def parse_action_label(
 
     raise ValueError(
         "不支援的 action_label。只接受 pickup <物品名稱>、"
-        f"putdown、{FINISHED_LABEL!r} 或 home。"
+        f"putdown tray、putdown box、{FINISHED_LABEL!r} 或 home。"
     )
 
 
@@ -860,10 +875,18 @@ def pick_sequence(
     )
 
 
-def place_sequence() -> Generator[str, None, None]:
+def place_sequence(
+    destination_name: str,
+    destination_position: np.ndarray,
+) -> Generator[str, None, None]:
+    """
+    將目前夾取物移動到指定目的地。
+
+    移動期間會持續維持夾爪閉合；到達目的地後才開爪。
+    """
     yield from move_to(
-        PLACE_POS,
-        phase="MOVING_TO_PLACE",
+        destination_position,
+        phase=f"MOVING_TO_{destination_name.upper()}",
     )
     yield from open_gripper()
     yield from go_home()
@@ -895,12 +918,25 @@ def build_new_task(
             target_position=target_position,
         )
 
-    if command == "putdown":
+    if command in {"putdown_tray", "putdown_box"}:
         if current_target_name is None:
             current_target_name = last_picked_target_name
 
-        log(f"[ROBOT] New putdown at {PLACE_POS}")
-        return place_sequence()
+        if command == "putdown_tray":
+            destination_name = "tray"
+            destination_position = TRAY_PLACE_POS
+        else:
+            destination_name = "box"
+            destination_position = BOX_PLACE_POS
+
+        log(
+            f"[ROBOT] New putdown destination={destination_name}, "
+            f"position={destination_position}"
+        )
+        return place_sequence(
+            destination_name=destination_name,
+            destination_position=destination_position,
+        )
 
     if command == "home":
         log(f"[ROBOT] Home directly to {HIGH_HOME_POS}")
@@ -1165,7 +1201,8 @@ def start_request(request: Dict[str, Any]) -> None:
         log("[EXECUTION] Home will run directly until completion.")
         return
 
-    # pickup / putdown：相同動作續跑，不同動作切換。
+    # pickup / putdown tray / putdown box：
+    # 相同動作與相同目的地續跑；不同目的地會切換成新動作。
     if (
         active_task is not None
         and active_action_key == new_action_key
@@ -1291,7 +1328,7 @@ def finish_completed() -> None:
     switched = execution_switched
     mode = execution_mode
 
-    if command in {"putdown", "home"}:
+    if command in {"putdown_tray", "putdown_box", "home"}:
         current_target_name = None
 
     hold_current_pose()
@@ -1574,6 +1611,8 @@ try:
     log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
     log("Close behavior    : finish gripper closing even after time limit")
     log("Home behavior     : run directly until completion")
+    log(f"Tray place pos    : {TRAY_PLACE_POS}")
+    log(f"Box place pos     : {BOX_PLACE_POS}")
     log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
     log(f"Gripper close pos : {GRIPPER_CLOSED_POSITIONS}")
     log("Grip hold         : CLOSED target maintained during pause/lift/move")
