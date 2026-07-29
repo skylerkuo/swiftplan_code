@@ -1,39 +1,50 @@
 #!/usr/bin/env python3
 """
-isaac_manual_record_server_2s.py
+isaac_manual_record_server_dynamic.py
 
-Isaac Sim 人工標註與 Franka 控制 Server。
+Isaac Sim 人工標註與 Franka 控制 Server（動態任務指令版本）。
 
-控制規則：
-1. 每一筆新指令都先拍照並寫入一筆 JSONL。
-2. JSONL 格式保持不變：
-   {
-       "image_path": "...png",
-       "instruction": "tidy up the properties",
-       "annotation": {
-           "action_label": "pickup apple"
+主要改動：
+1. instruction 不再限制為固定白名單，只要是非空字串即可，例如：
+       put the apple into the tray
+       put the cube into the box
+       tidy up the properties into the tray
+       prepare the fruits
+2. 目前機器人控制技能保留：
+       pickup <物品名稱>
+       putdown tray
+       putdown box
+       finished
+       clear
+       home
+3. putdown 可只傳 "putdown"，Server 會使用 request 中的
+   default_destination；若未提供，會嘗試從 instruction 推定 tray/box，
+   最後才使用 DEFAULT_DESTINATION。
+4. JSONL 格式維持不變：
+       {
+           "image_path": "...png",
+           "instruction": "put the apple into the box",
+           "annotation": {
+               "action_label": "pickup apple"
+           }
        }
-   }
-3. pickup / putdown tray / putdown box：
-   - 一般情況每次執行 2 秒模擬時間。
-   - 若 2 秒到達時正在閉合夾爪，會繼續完成整個閉合階段。
-   - 夾爪閉合完成後立即暫停，不會直接進入後續抬升。
-   - 一旦完成閉合，暫停、抬升與移動期間都持續維持閉合目標。
-   - 直到 putdown 進入開爪階段，才解除閉合目標。
-   - 相同指令從原 generator 暫停位置繼續。
-   - 不同指令取消原 generator，開始新動作。
-4. home：
-   - 先記錄一筆資料。
-   - 不受 2 秒限制，直接執行到完成。
-5. finished：
-   - 記錄完整 finished 標註。
-   - 取消目前動作並保持手臂目前姿態。
-   - 不執行其他機械手臂動作。
-6. clear：
-   - 不拍照、不寫入 JSONL。
-   - 取消目前尚未完成的動作。
-   - 執行 World reset，恢復 USD 載入時的初始場景狀態。
-7. 每個 TCP 連線只處理一筆 JSON 指令，回覆後立即關閉。
+5. finished 仍寫成完整標註：
+       "<instruction> finished"
+6. pickup / putdown 每次最多執行 2 秒模擬時間：
+   - 相同 instruction 與相同動作：從原 generator 暫停位置繼續。
+   - instruction、目標物或目的地不同：取消舊 generator，建立新動作。
+   - 若時間到達時正在閉合夾爪，會完成閉合後再暫停。
+7. home 不受 2 秒限制，直接執行到完成。
+8. clear 不拍照、不寫入 JSONL，直接重設場景。
+9. 每個 TCP 連線只處理一筆 JSON 指令。
+
+Request 範例：
+    {
+        "request_id": "abc123",
+        "instruction": "put the cube into the box",
+        "default_destination": "box",
+        "action_label": "pickup cube"
+    }
 """
 
 from __future__ import annotations
@@ -85,28 +96,26 @@ SAVE_DIR = DATA_ROOT / "captured_images"
 JSONL_PATH = DATA_ROOT / "data_gradu.jsonl"
 USD_PATH = str(DATA_ROOT / "graduation.usd")
 
-# Server 可接受的兩種完整任務指令。
-TASK_INSTRUCTIONS = {
-    "tray": "tidy up the properties into the tray",
-    "box": "tidy up the properties into the box",
-}
-
-DEFAULT_TASK_DESTINATION = "tray"
-DEFAULT_TASK_INSTRUCTION = TASK_INSTRUCTIONS[
-    DEFAULT_TASK_DESTINATION
-]
+DEFAULT_TASK_INSTRUCTION = "tidy up the properties into the tray"
+DEFAULT_DESTINATION = "tray"
 
 CAMERA_PRIM_PATH = "/World/Camera"
 FRANKA_PRIM_PATH = "/World/Franka"
 CAMERA_RESOLUTION = (640, 480)
 
+# 與原始程式註解一致，設定為 2 秒模擬時間。
 ACTION_SLICE_SECONDS = 2.0
 DEFAULT_PHYSICS_DT = 1.0 / 60.0
 
+# 物品別名與 USD Prim path。
+# 未列出的物品仍會依名稱自動搜尋：
+#   /World/<target_name>
+#   /World/<target_name 將空白轉底線>
+#   Stage 中同名 Prim
 TARGET_PRIM_PATHS: Dict[str, str] = {
     # "apple": "/World/Apple",
     # "orange": "/World/Orange",
-    # "cube": "/World/Cube",
+    # "red cube": "/World/RedCube",
 }
 
 TARGET_GRASP_OFFSETS: Dict[str, np.ndarray] = {
@@ -116,26 +125,43 @@ TARGET_GRASP_OFFSETS: Dict[str, np.ndarray] = {
 VERTICAL_Q = np.array([0.0, 1.0, 0.0, 0.0])
 HIGH_HOME_POS = np.array([0.4, 0.0, 0.6])
 
-# 兩個固定放置位置。
-# 依照目前需求：tray 位於正 Y 側，box 位於負 Y 側。
-# 若實際場景座標不同，只需修改這兩個陣列。
-TRAY_PLACE_POS = np.array(
-    [-0.12, -0.65, 0.45],
-    dtype=np.float64,
-)
-BOX_PLACE_POS = np.array(
-    [-0.12, 0.65, 0.45],
-    dtype=np.float64,
-)
+# 目前場景仍支援 tray 與 box；之後新增 basket、shelf 等目的地時，
+# 只需在此新增設定，不必修改解析與執行主流程。
+#
+# prim_path：
+#   - 設為有效 USD Prim path 時，會使用該 Prim 的即時世界座標。
+#   - 設為 None 時，使用 fixed_position。
+# place_offset：
+#   - 若使用 prim_path，可用來把末端位置抬高到容器上方。
+DESTINATION_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "tray": {
+        "prim_path": None,
+        "fixed_position": np.array(
+            [-0.12, -0.65, 0.45],
+            dtype=np.float64,
+        ),
+        "place_offset": np.zeros(3, dtype=np.float64),
+    },
+    "box": {
+        "prim_path": None,
+        "fixed_position": np.array(
+            [-0.12, 0.65, 0.45],
+            dtype=np.float64,
+        ),
+        "place_offset": np.zeros(3, dtype=np.float64),
+    },
+}
+
+if DEFAULT_DESTINATION not in DESTINATION_CONFIGS:
+    raise ValueError(
+        "DEFAULT_DESTINATION 必須存在於 DESTINATION_CONFIGS。"
+    )
 
 APPROACH_HEIGHT = 0.10
 GRASP_Z_OFFSET = 0.014
-# 抓取後先垂直抬升，避免水平分量使物體從指間滑落。
 LIFT_OFFSET = np.array([0.0, 0.0, 0.12])
 LIFT_FRAMES = 150
 
-# Franka Panda 兩根手指的關節位置（公尺）。
-# 每根手指 0.04 為張開；0.0 為完全閉合目標。
 GRIPPER_OPEN_POSITIONS = np.array(
     [0.035, 0.035],
     dtype=np.float64,
@@ -154,6 +180,7 @@ CAPTURE_SETTLE_FRAMES = 3
 CLEAR_WARMUP_FRAMES = 10
 
 COMPLETED_REQUEST_CACHE_SIZE = 200
+MAX_INSTRUCTION_CHARS = 1000
 DEBUG = True
 
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -262,46 +289,42 @@ log(
 current_target_name: Optional[str] = None
 last_picked_target_name: Optional[str] = None
 
-# 未完成、可在下一次相同指令時繼續的 generator。
-active_task: Optional[Generator[None, None, None]] = None
-active_action_key: Optional[Tuple[str, Optional[str]]] = None
+# Action key：command, target, destination, normalized instruction
+ActiveActionKey = Tuple[
+    str,
+    Optional[str],
+    Optional[str],
+    str,
+]
+
+active_task: Optional[Generator[str, None, None]] = None
+active_action_key: Optional[ActiveActionKey] = None
 active_action_label: Optional[str] = None
 active_command: Optional[str] = None
 active_target_name: Optional[str] = None
+active_destination_name: Optional[str] = None
 
-# 目前這一筆 request 的執行狀態。
 execution_running = False
 execution_mode: Optional[str] = None  # "SLICE" 或 "FULL"
 execution_steps_remaining = 0
 execution_request_id: Optional[str] = None
 execution_image_path: Optional[str] = None
-
-# 保存目前非同步執行中的完整任務指令。
-# start_request() 結束後，finish_paused() / finish_completed() /
-# fail_execution() 仍需要使用此值。
 execution_task_instruction: Optional[str] = None
-
+execution_default_destination: Optional[str] = None
 execution_continued = False
 execution_switched = False
 
-# 目前 generator 正在執行的細部階段。
-# 兩秒到達時若為 GRIPPER_CLOSING，會繼續到 GRIPPER_CLOSED_BOUNDARY。
 current_motion_phase = "IDLE"
 slice_time_expired = False
 
-# 持續夾持目標。
-# 一旦 close_gripper() 設為閉合，即使 generator 暫停或手臂正在移動，
-# 每一個 simulation step 都會重新送出閉合位置，直到 open_gripper()。
 desired_gripper_positions: Optional[np.ndarray] = (
     GRIPPER_OPEN_POSITIONS.copy()
 )
 
-# 單次 TCP 連線狀態。
 client_conn: Optional[socket.socket] = None
 client_addr: Optional[Tuple[str, int]] = None
 request_buffer = bytearray()
 
-# 相同 request_id 不可重複記錄或執行。
 completed_requests: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
 
@@ -385,78 +408,149 @@ def cache_completed_reply(
 # Command parsing
 # =========================
 
-def parse_task_instruction(
-    instruction: Any,
-) -> Tuple[str, str]:
-    """
-    驗證 Client 傳入的完整任務指令。
-
-    回傳：
-        task_instruction, task_destination
-    """
+def normalize_instruction(instruction: Any) -> str:
+    """接受任意非空自然語言任務指令，不使用固定 instruction 白名單。"""
     if instruction is None:
-        task_instruction = DEFAULT_TASK_INSTRUCTION
+        text = DEFAULT_TASK_INSTRUCTION
     elif isinstance(instruction, str):
-        task_instruction = instruction.strip()
+        text = instruction.strip()
     else:
         raise ValueError("instruction 必須是字串。")
 
-    for destination, allowed_instruction in TASK_INSTRUCTIONS.items():
-        if task_instruction.lower() == allowed_instruction.lower():
-            return allowed_instruction, destination
+    if not text:
+        raise ValueError("instruction 不可為空。")
 
-    allowed_text = "、".join(
-        repr(value)
-        for value in TASK_INSTRUCTIONS.values()
-    )
-    raise ValueError(
-        f"不支援的 instruction：{task_instruction!r}。"
-        f"只接受 {allowed_text}。"
-    )
+    if len(text) > MAX_INSTRUCTION_CHARS:
+        raise ValueError(
+            f"instruction 過長，最多 {MAX_INSTRUCTION_CHARS} 個字元。"
+        )
+
+    return text
+
+
+def normalize_destination(destination: Any) -> str:
+    if not isinstance(destination, str):
+        raise ValueError("目的地必須是字串。")
+
+    normalized = destination.strip().lower()
+
+    if normalized not in DESTINATION_CONFIGS:
+        allowed = "、".join(sorted(DESTINATION_CONFIGS))
+        raise ValueError(
+            f"不支援的目的地 {normalized!r}；目前只支援：{allowed}。"
+        )
+
+    return normalized
+
+
+def infer_destination_from_instruction(
+    instruction: str,
+) -> Optional[str]:
+    lower = instruction.lower()
+    matches = []
+
+    for destination in DESTINATION_CONFIGS:
+        if re.search(rf"\b{re.escape(destination)}\b", lower):
+            matches.append(destination)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def resolve_default_destination(
+    request: Dict[str, Any],
+    task_instruction: str,
+) -> str:
+    """
+    目的地解析優先順序：
+    1. request["default_destination"]
+    2. request["task"]["destination"]（相容未來結構化 TaskSpec）
+    3. 從 instruction 中推定 tray 或 box
+    4. DEFAULT_DESTINATION
+    """
+    raw_destination = request.get("default_destination")
+
+    if raw_destination is not None:
+        return normalize_destination(raw_destination)
+
+    task_spec = request.get("task")
+    if isinstance(task_spec, dict):
+        task_destination = task_spec.get("destination")
+        if task_destination is not None:
+            return normalize_destination(task_destination)
+
+    inferred = infer_destination_from_instruction(task_instruction)
+    if inferred is not None:
+        return inferred
+
+    return DEFAULT_DESTINATION
 
 
 def parse_action_label(
     action_label: str,
     task_instruction: str,
-    task_destination: str,
-) -> Tuple[str, Optional[str]]:
+    default_destination: str,
+) -> Tuple[
+    str,
+    Optional[str],
+    Optional[str],
+    str,
+]:
+    """
+    回傳：
+        command, target_name, destination_name, canonical_action_label
+    """
     text = str(action_label).strip()
     lower = text.lower()
 
     if not text:
         raise ValueError("action_label 不可為空。")
 
-    expected_finished_label = (
-        f"{task_instruction} finished"
-    )
+    expected_finished_label = f"{task_instruction} finished"
 
-    # Client 可只送出 finished；Server 依固定 instruction 自動展開。
     if lower in {
         "finished",
         expected_finished_label.lower(),
     }:
-        return "finished", None
-
-    if lower == "putdown":
-        return f"putdown_{task_destination}", None
-
-    if lower in {"putdown tray", "putdown box"}:
-        requested_destination = lower.split(maxsplit=1)[1]
-
-        if requested_destination != task_destination:
-            raise ValueError(
-                f"目前 instruction 的目的地為 "
-                f"{task_destination}，不可使用 "
-                f"putdown {requested_destination}。"
-            )
-
-        return f"putdown_{requested_destination}", None
+        return (
+            "finished",
+            None,
+            None,
+            expected_finished_label,
+        )
 
     if lower == "clear":
-        return "clear", None
+        return "clear", None, None, "clear"
 
     if lower == "home":
-        return "home", None
+        return "home", None, None, "home"
+
+    if lower == "putdown":
+        destination = normalize_destination(default_destination)
+        return (
+            "putdown",
+            None,
+            destination,
+            f"putdown {destination}",
+        )
+
+    if lower.startswith("putdown"):
+        parts = text.split(maxsplit=1)
+
+        if len(parts) != 2 or not parts[1].strip():
+            raise ValueError(
+                "putdown 後面必須提供目的地，例如：putdown box"
+            )
+
+        destination = normalize_destination(parts[1])
+        return (
+            "putdown",
+            None,
+            destination,
+            f"putdown {destination}",
+        )
 
     if lower.startswith("pickup"):
         parts = text.split(maxsplit=1)
@@ -464,25 +558,46 @@ def parse_action_label(
         if len(parts) != 2 or not parts[1].strip():
             raise ValueError("pickup 後面必須有物品名稱。")
 
-        return "pickup", parts[1].strip()
+        target_name = parts[1].strip()
+        return (
+            "pickup",
+            target_name,
+            None,
+            f"pickup {target_name}",
+        )
 
     raise ValueError(
-        "不支援的 action_label。只接受 pickup <物品名稱>、"
-        f"putdown {task_destination}、finished、clear 或 home。"
+        "不支援的 action_label。只接受 pickup <物品名稱>、putdown、"
+        "putdown tray、putdown box、finished、clear 或 home。"
     )
 
 
 def make_action_key(
     command: str,
     target_name: Optional[str],
-) -> Tuple[str, Optional[str]]:
+    destination_name: Optional[str],
+    task_instruction: str,
+) -> ActiveActionKey:
     normalized_target = (
         target_name.strip().lower()
         if target_name is not None
         else None
     )
+    normalized_destination = (
+        destination_name.strip().lower()
+        if destination_name is not None
+        else None
+    )
+    normalized_instruction = " ".join(
+        task_instruction.strip().lower().split()
+    )
 
-    return command, normalized_target
+    return (
+        command,
+        normalized_target,
+        normalized_destination,
+        normalized_instruction,
+    )
 
 
 # =========================
@@ -491,7 +606,7 @@ def make_action_key(
 
 def find_target_prim_path(target_name: str) -> str:
     stage = omni.usd.get_context().get_stage()
-    lookup_key = target_name.lower()
+    lookup_key = target_name.strip().lower()
 
     configured_path = TARGET_PRIM_PATHS.get(lookup_key)
 
@@ -505,16 +620,28 @@ def find_target_prim_path(target_name: str) -> str:
             f"TARGET_PRIM_PATHS 指定的 Prim 不存在：{configured_path}"
         )
 
-    direct_path = f"/World/{target_name}"
-    direct_prim = stage.GetPrimAtPath(direct_path)
+    candidate_names = [
+        target_name.strip(),
+        target_name.strip().replace(" ", "_"),
+        "".join(part.capitalize() for part in target_name.split()),
+    ]
 
-    if direct_prim and direct_prim.IsValid():
-        return direct_path
+    tried_paths = []
+    for candidate_name in dict.fromkeys(candidate_names):
+        direct_path = f"/World/{candidate_name}"
+        tried_paths.append(direct_path)
+        direct_prim = stage.GetPrimAtPath(direct_path)
+
+        if direct_prim and direct_prim.IsValid():
+            return direct_path
 
     matches = []
 
     for prim in stage.Traverse():
-        if prim.GetName().lower() == lookup_key:
+        prim_name = prim.GetName().strip().lower()
+        normalized_prim_name = prim_name.replace("_", " ")
+
+        if prim_name == lookup_key or normalized_prim_name == lookup_key:
             matches.append(str(prim.GetPath()))
 
     if len(matches) == 1:
@@ -527,7 +654,7 @@ def find_target_prim_path(target_name: str) -> str:
         )
 
     raise ValueError(
-        f"找不到物品 {target_name!r}。已嘗試 {direct_path}，"
+        f"找不到物品 {target_name!r}。已嘗試 {tried_paths}，"
         "也找不到同名 Prim。"
     )
 
@@ -549,6 +676,45 @@ def get_world_position(prim_path: str) -> np.ndarray:
         [translation[0], translation[1], translation[2]],
         dtype=np.float64,
     )
+
+
+def get_destination_position(destination_name: str) -> np.ndarray:
+    destination = normalize_destination(destination_name)
+    config = DESTINATION_CONFIGS[destination]
+
+    prim_path = config.get("prim_path")
+    place_offset = np.asarray(
+        config.get("place_offset", np.zeros(3)),
+        dtype=np.float64,
+    )
+
+    if place_offset.shape != (3,):
+        raise ValueError(
+            f"{destination} 的 place_offset 必須是長度 3 的向量。"
+        )
+
+    if prim_path:
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(str(prim_path))
+
+        if prim and prim.IsValid():
+            return get_world_position(str(prim_path)) + place_offset
+
+        raise ValueError(
+            f"目的地 {destination!r} 的 Prim 不存在：{prim_path}"
+        )
+
+    fixed_position = np.asarray(
+        config.get("fixed_position"),
+        dtype=np.float64,
+    )
+
+    if fixed_position.shape != (3,):
+        raise ValueError(
+            f"{destination} 的 fixed_position 必須是長度 3 的向量。"
+        )
+
+    return fixed_position.copy() + place_offset
 
 
 # =========================
@@ -614,10 +780,10 @@ def capture_and_append_jsonl(
 ) -> str:
     """
     每一筆新 request 都拍照並寫入一筆 JSONL。
-    JSONL 欄位與原格式完全相同。
+
+    JSONL 欄位維持：image_path、instruction、annotation.action_label。
     """
     for _ in range(CAPTURE_SETTLE_FRAMES):
-        # 拍照等待期間若正在拿著物體，仍持續維持夾爪閉合。
         maintain_gripper_target()
         world.step(render=True)
 
@@ -660,7 +826,8 @@ def capture_and_append_jsonl(
         os.fsync(file.fileno())
 
     log(f"[DATA] Image saved : {final_path}")
-    log(f"[DATA] Action label : {action_label!r}")
+    log(f"[DATA] Instruction : {task_instruction!r}")
+    log(f"[DATA] Action label: {action_label!r}")
     debug(f"[DATA] request_id={request_id}")
 
     return str(final_path)
@@ -672,10 +839,7 @@ def capture_and_append_jsonl(
 
 def hold_current_pose() -> None:
     """
-    暫停手臂姿態，但不要把夾爪改成當下的半閉合位置。
-
-    Franka 一般包含 7 個手臂關節與 2 個手指關節。此處優先只
-    Hold 手臂關節；夾爪則由 maintain_gripper_target() 持續控制。
+    暫停手臂姿態，但不把夾爪改成當下的半閉合位置。
     """
     joint_positions = franka.get_joint_positions()
 
@@ -689,7 +853,6 @@ def hold_current_pose() -> None:
         dtype=np.float64,
     )
 
-    # 最後兩個 DOF 視為手指關節。
     arm_dof_count = max(0, joint_positions.size - 2)
 
     try:
@@ -716,8 +879,6 @@ def hold_current_pose() -> None:
         franka.apply_action(hold_action)
 
     except TypeError:
-        # 相容部分不支援 joint_indices 的舊版 Isaac Sim。
-        # 即使暫時對全部關節 Hold，後面也會立刻重新送出夾爪目標。
         fallback_action = ArticulationAction(
             joint_positions=joint_positions.copy(),
             joint_velocities=np.zeros_like(joint_positions),
@@ -733,19 +894,12 @@ def hold_current_pose() -> None:
 # =========================
 
 def set_motion_phase(phase: str) -> str:
-    """更新並回傳目前細部動作階段。"""
     global current_motion_phase
     current_motion_phase = phase
     return phase
 
 
 def apply_gripper_target(target_positions: np.ndarray) -> None:
-    """
-    每個 simulation step 都重新送出夾爪目標。
-
-    這可避免兩秒暫停時 hold_current_pose() 固定半閉合位置後，
-    下一次續跑卻沒有重新送出閉合命令。
-    """
     target_positions = np.asarray(
         target_positions,
         dtype=np.float64,
@@ -766,7 +920,6 @@ def apply_gripper_target(target_positions: np.ndarray) -> None:
 def set_desired_gripper_positions(
     target_positions: np.ndarray,
 ) -> None:
-    """設定之後每一個 simulation step 都要維持的夾爪目標。"""
     global desired_gripper_positions
 
     target_positions = np.asarray(
@@ -785,12 +938,6 @@ def set_desired_gripper_positions(
 
 
 def maintain_gripper_target() -> None:
-    """
-    持續施加夾爪目標。
-
-    即使 pickup generator 暫停、手臂正在抬升或移動到放置區，
-    只要 desired_gripper_positions 仍是 CLOSED，就會持續夾緊。
-    """
     if desired_gripper_positions is None:
         return
 
@@ -798,7 +945,6 @@ def maintain_gripper_target() -> None:
 
 
 def get_finger_positions() -> Optional[np.ndarray]:
-    """讀取最後兩個手指關節位置，供除錯顯示。"""
     joint_positions = franka.get_joint_positions()
 
     if joint_positions is None:
@@ -834,12 +980,6 @@ def move_to(
 def open_gripper(
     frames: int = GRIPPER_OPEN_FRAMES,
 ) -> Generator[str, None, None]:
-    """
-    設定持續張開目標。
-
-    一旦進入此階段，之後每個 simulation step 都會維持 OPEN，
-    直到下一次 close_gripper()。
-    """
     set_desired_gripper_positions(GRIPPER_OPEN_POSITIONS)
 
     for frame_index in range(frames):
@@ -862,12 +1002,6 @@ def open_gripper(
 def close_gripper(
     frames: int = GRIPPER_CLOSE_FRAMES,
 ) -> Generator[str, None, None]:
-    """
-    設定持續閉合目標。
-
-    閉合完成後不會解除此目標。暫停、抬升、移動到放置位置期間
-    都會持續送出 CLOSED target，直到 putdown 執行 open_gripper()。
-    """
     set_desired_gripper_positions(GRIPPER_CLOSED_POSITIONS)
 
     for frame_index in range(frames):
@@ -884,7 +1018,6 @@ def close_gripper(
 
         yield set_motion_phase("GRIPPER_CLOSING")
 
-    # 只代表閉合階段完成；desired target 仍保持 CLOSED。
     yield set_motion_phase("GRIPPER_CLOSED_BOUNDARY")
 
 
@@ -938,7 +1071,6 @@ def pick_sequence(
 
     yield from close_gripper()
 
-    # 只有下一次相同 pickup 指令續跑後，才會從此處開始抬升。
     yield from move_to(
         lift_position,
         frames=LIFT_FRAMES,
@@ -950,11 +1082,6 @@ def place_sequence(
     destination_name: str,
     destination_position: np.ndarray,
 ) -> Generator[str, None, None]:
-    """
-    將目前夾取物移動到指定目的地。
-
-    移動期間會持續維持夾爪閉合；到達目的地後才開爪。
-    """
     yield from move_to(
         destination_position,
         phase=f"MOVING_TO_{destination_name.upper()}",
@@ -966,6 +1093,7 @@ def place_sequence(
 def build_new_task(
     command: str,
     target_name: Optional[str],
+    destination_name: Optional[str],
 ) -> Generator[str, None, None]:
     global current_target_name
     global last_picked_target_name
@@ -989,21 +1117,22 @@ def build_new_task(
             target_position=target_position,
         )
 
-    if command in {"putdown_tray", "putdown_box"}:
+    if command == "putdown":
+        assert destination_name is not None
+
         if current_target_name is None:
             current_target_name = last_picked_target_name
 
-        if command == "putdown_tray":
-            destination_name = "tray"
-            destination_position = TRAY_PLACE_POS
-        else:
-            destination_name = "box"
-            destination_position = BOX_PLACE_POS
+        destination_position = get_destination_position(
+            destination_name
+        )
 
         log(
-            f"[ROBOT] New putdown destination={destination_name}, "
-            f"position={destination_position}"
+            f"[ROBOT] New putdown: destination={destination_name!r}, "
+            f"position={destination_position}, "
+            f"held_target={current_target_name!r}"
         )
+
         return place_sequence(
             destination_name=destination_name,
             destination_position=destination_position,
@@ -1026,12 +1155,14 @@ def clear_active_action() -> None:
     global active_action_label
     global active_command
     global active_target_name
+    global active_destination_name
 
     active_task = None
     active_action_key = None
     active_action_label = None
     active_command = None
     active_target_name = None
+    active_destination_name = None
 
 
 def clear_execution_state() -> None:
@@ -1041,6 +1172,7 @@ def clear_execution_state() -> None:
     global execution_request_id
     global execution_image_path
     global execution_task_instruction
+    global execution_default_destination
     global execution_continued
     global execution_switched
     global slice_time_expired
@@ -1051,6 +1183,7 @@ def clear_execution_state() -> None:
     execution_request_id = None
     execution_image_path = None
     execution_task_instruction = None
+    execution_default_destination = None
     execution_continued = False
     execution_switched = False
     slice_time_expired = False
@@ -1067,14 +1200,7 @@ def cancel_active_action() -> None:
     hold_current_pose()
 
 
-
 def reset_scene_to_usd_state() -> None:
-    """
-    將場景恢復為目前 USD 載入時的初始狀態。
-
-    world.reset() 會重新初始化物理模擬與已註冊的 Scene 物件，
-    因此 Franka、剛體物件及其速度會回到模擬開始時的狀態。
-    """
     global current_target_name
     global last_picked_target_name
     global desired_gripper_positions
@@ -1082,21 +1208,15 @@ def reset_scene_to_usd_state() -> None:
 
     log("[CLEAR] Resetting scene to the USD initial state.")
 
-    # 直接丟棄尚未完成的 generator；不要先 Hold，因為接著要完整 Reset。
     clear_active_action()
     clear_execution_state()
 
     current_target_name = None
     last_picked_target_name = None
     current_motion_phase = "IDLE"
-
-    # 避免 Reset 後主迴圈仍持續送出先前的閉合目標。
     desired_gripper_positions = GRIPPER_OPEN_POSITIONS.copy()
 
-    # 重新初始化模擬，恢復 USD 所定義的初始姿態。
     world.reset()
-
-    # Reset 後重新初始化相機與控制器狀態。
     camera.initialize()
     rmpflow_controller.reset()
 
@@ -1119,6 +1239,7 @@ def start_request(request: Dict[str, Any]) -> None:
     global active_action_label
     global active_command
     global active_target_name
+    global active_destination_name
 
     global execution_running
     global execution_mode
@@ -1126,6 +1247,7 @@ def start_request(request: Dict[str, Any]) -> None:
     global execution_request_id
     global execution_image_path
     global execution_task_instruction
+    global execution_default_destination
     global execution_continued
     global execution_switched
     global slice_time_expired
@@ -1170,21 +1292,22 @@ def start_request(request: Dict[str, Any]) -> None:
         )
         return
 
-    action_label = action_label_raw.strip()
-
     try:
-        task_instruction, task_destination = (
-            parse_task_instruction(instruction_raw)
-        )
-        command, target_name = parse_action_label(
-            action_label=action_label,
+        task_instruction = normalize_instruction(instruction_raw)
+        default_destination = resolve_default_destination(
+            request=request,
             task_instruction=task_instruction,
-            task_destination=task_destination,
         )
-
-        # JSONL 中仍保留完整完成標註，不把簡短的 "finished" 寫入資料集。
-        if command == "finished":
-            action_label = f"{task_instruction} finished"
+        (
+            command,
+            target_name,
+            destination_name,
+            action_label,
+        ) = parse_action_label(
+            action_label=action_label_raw,
+            task_instruction=task_instruction,
+            default_destination=default_destination,
+        )
 
     except ValueError as exc:
         send_reply_and_close(
@@ -1199,15 +1322,18 @@ def start_request(request: Dict[str, Any]) -> None:
     new_action_key = make_action_key(
         command=command,
         target_name=target_name,
+        destination_name=destination_name,
+        task_instruction=task_instruction,
     )
 
     log(
         f"[REQUEST] id={request_id} | "
         f"instruction={task_instruction!r} | "
+        f"default_destination={default_destination!r} | "
         f"action_label={action_label!r}"
     )
 
-    # clear 是場景控制指令，不拍照，也不寫入 JSONL。
+    # clear：不拍照、不寫入 JSONL。
     if command == "clear":
         try:
             reset_scene_to_usd_state()
@@ -1222,6 +1348,7 @@ def start_request(request: Dict[str, Any]) -> None:
                 command=command,
                 action_label=action_label,
                 instruction=task_instruction,
+                default_destination=default_destination,
                 message=(
                     "場景恢復失敗："
                     f"{type(exc).__name__}: {exc}"
@@ -1242,6 +1369,8 @@ def start_request(request: Dict[str, Any]) -> None:
             command=command,
             action_label=action_label,
             instruction=task_instruction,
+            default_destination=default_destination,
+            destination=None,
             recorded=False,
             image_path=None,
             motion_executed=True,
@@ -1253,7 +1382,7 @@ def start_request(request: Dict[str, Any]) -> None:
         send_reply_and_close(reply)
         return
 
-    # pickup 先驗證物品存在，避免錯誤物品名稱被寫入資料集。
+    # 在寫資料前先驗證 pickup 物品或 putdown 目的地。
     if command == "pickup":
         try:
             assert target_name is not None
@@ -1268,13 +1397,37 @@ def start_request(request: Dict[str, Any]) -> None:
                 make_reply(
                     request_id,
                     "ERROR",
+                    instruction=task_instruction,
+                    action_label=action_label,
                     message=str(exc),
                     recorded=False,
                 )
             )
             return
 
-    # 每一筆新 request 都記錄一次資料，包含 home 與 finished。
+    if command == "putdown":
+        try:
+            assert destination_name is not None
+            get_destination_position(destination_name)
+
+        except Exception as exc:
+            log_exception(
+                "[REQUEST] Cannot resolve putdown destination",
+                exc,
+            )
+            send_reply_and_close(
+                make_reply(
+                    request_id,
+                    "ERROR",
+                    instruction=task_instruction,
+                    action_label=action_label,
+                    destination=destination_name,
+                    message=str(exc),
+                    recorded=False,
+                )
+            )
+            return
+
     try:
         image_path = capture_and_append_jsonl(
             action_label=action_label,
@@ -1296,12 +1449,14 @@ def start_request(request: Dict[str, Any]) -> None:
                     "資料記錄失敗："
                     f"{type(exc).__name__}: {exc}"
                 ),
+                instruction=task_instruction,
+                action_label=action_label,
                 recorded=False,
             )
         )
         return
 
-    # finished：取消未完成動作，記錄後立即完成。
+    # finished：只記錄，不執行機械手臂動作。
     if command == "finished":
         cancel_active_action()
         current_target_name = None
@@ -1313,6 +1468,8 @@ def start_request(request: Dict[str, Any]) -> None:
             command=command,
             action_label=action_label,
             instruction=task_instruction,
+            default_destination=default_destination,
+            destination=None,
             recorded=True,
             image_path=image_path,
             motion_executed=False,
@@ -1326,7 +1483,7 @@ def start_request(request: Dict[str, Any]) -> None:
         send_reply_and_close(reply)
         return
 
-    # home：取消未完成動作，建立 Home generator，直接跑到完成。
+    # home：取消未完成動作，直接跑到完成。
     if command == "home":
         switched = active_task is not None
 
@@ -1337,6 +1494,7 @@ def start_request(request: Dict[str, Any]) -> None:
             active_task = build_new_task(
                 command="home",
                 target_name=None,
+                destination_name=None,
             )
 
         except Exception as exc:
@@ -1349,6 +1507,8 @@ def start_request(request: Dict[str, Any]) -> None:
                 command=command,
                 action_label=action_label,
                 instruction=task_instruction,
+                default_destination=default_destination,
+                destination=None,
                 message=(
                     "建立 Home 動作失敗："
                     f"{type(exc).__name__}: {exc}"
@@ -1366,6 +1526,7 @@ def start_request(request: Dict[str, Any]) -> None:
         active_action_label = action_label
         active_command = command
         active_target_name = None
+        active_destination_name = None
 
         execution_running = True
         execution_mode = "FULL"
@@ -1373,6 +1534,7 @@ def start_request(request: Dict[str, Any]) -> None:
         execution_request_id = request_id
         execution_image_path = image_path
         execution_task_instruction = task_instruction
+        execution_default_destination = default_destination
         execution_continued = False
         execution_switched = switched
         slice_time_expired = False
@@ -1380,8 +1542,7 @@ def start_request(request: Dict[str, Any]) -> None:
         log("[EXECUTION] Home will run directly until completion.")
         return
 
-    # pickup / putdown tray / putdown box：
-    # 相同動作與相同目的地續跑；不同目的地會切換成新動作。
+    # pickup / putdown：同一 instruction、物品與目的地才續跑。
     if (
         active_task is not None
         and active_action_key == new_action_key
@@ -1408,6 +1569,7 @@ def start_request(request: Dict[str, Any]) -> None:
             active_task = build_new_task(
                 command=command,
                 target_name=target_name,
+                destination_name=destination_name,
             )
 
         except Exception as exc:
@@ -1423,6 +1585,8 @@ def start_request(request: Dict[str, Any]) -> None:
                 command=command,
                 action_label=action_label,
                 instruction=task_instruction,
+                default_destination=default_destination,
+                destination=destination_name,
                 message=(
                     "建立機械手臂動作失敗："
                     f"{type(exc).__name__}: {exc}"
@@ -1440,6 +1604,7 @@ def start_request(request: Dict[str, Any]) -> None:
         active_action_label = action_label
         active_command = command
         active_target_name = target_name
+        active_destination_name = destination_name
         continued = False
 
     execution_running = True
@@ -1448,12 +1613,13 @@ def start_request(request: Dict[str, Any]) -> None:
     execution_request_id = request_id
     execution_image_path = image_path
     execution_task_instruction = task_instruction
+    execution_default_destination = default_destination
     execution_continued = continued
     execution_switched = switched
     slice_time_expired = False
 
     log(
-        f"[EXECUTION] Start 2-second slice: "
+        f"[EXECUTION] Start {ACTION_SLICE_SECONDS:.1f}-second slice: "
         f"steps={ACTION_SLICE_STEPS}, "
         f"continued={continued}, switched={switched}"
     )
@@ -1464,12 +1630,15 @@ def finish_paused() -> None:
     assert active_command is not None
     assert active_action_label is not None
     assert execution_task_instruction is not None
+    assert execution_default_destination is not None
 
     request_id = execution_request_id
     image_path = execution_image_path
     instruction = execution_task_instruction
+    default_destination = execution_default_destination
     command = active_command
     action_label = active_action_label
+    destination = active_destination_name
     continued = execution_continued
     switched = execution_switched
 
@@ -1482,6 +1651,8 @@ def finish_paused() -> None:
         command=command,
         action_label=action_label,
         instruction=instruction,
+        default_destination=default_destination,
+        destination=destination,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1490,6 +1661,7 @@ def finish_paused() -> None:
         switched=switched,
         slice_seconds=ACTION_SLICE_SECONDS,
         remaining_action=active_action_label,
+        motion_phase=current_motion_phase,
     )
 
     cache_completed_reply(request_id, reply)
@@ -1504,17 +1676,20 @@ def finish_completed() -> None:
     assert active_command is not None
     assert active_action_label is not None
     assert execution_task_instruction is not None
+    assert execution_default_destination is not None
 
     request_id = execution_request_id
     image_path = execution_image_path
     instruction = execution_task_instruction
+    default_destination = execution_default_destination
     command = active_command
     action_label = active_action_label
+    destination = active_destination_name
     continued = execution_continued
     switched = execution_switched
     mode = execution_mode
 
-    if command in {"putdown_tray", "putdown_box", "home"}:
+    if command in {"putdown", "home"}:
         current_target_name = None
 
     hold_current_pose()
@@ -1533,6 +1708,8 @@ def finish_completed() -> None:
         command=command,
         action_label=action_label,
         instruction=instruction,
+        default_destination=default_destination,
+        destination=destination,
         recorded=True,
         image_path=image_path,
         motion_executed=True,
@@ -1543,6 +1720,7 @@ def finish_completed() -> None:
             None if mode == "FULL" else ACTION_SLICE_SECONDS
         ),
         remaining_action=None,
+        motion_phase=current_motion_phase,
     )
 
     cache_completed_reply(request_id, reply)
@@ -1554,8 +1732,10 @@ def fail_execution(exc: BaseException) -> None:
     request_id = execution_request_id
     image_path = execution_image_path
     instruction = execution_task_instruction
+    default_destination = execution_default_destination
     command = active_command
     action_label = active_action_label
+    destination = active_destination_name
 
     log_exception("[ROBOT] Execution failed", exc)
 
@@ -1569,6 +1749,8 @@ def fail_execution(exc: BaseException) -> None:
         command=command,
         action_label=action_label,
         instruction=instruction,
+        default_destination=default_destination,
+        destination=destination,
         message=(
             "機械手臂動作失敗："
             f"{type(exc).__name__}: {exc}"
@@ -1577,6 +1759,7 @@ def fail_execution(exc: BaseException) -> None:
         image_path=image_path,
         motion_executed=False,
         action_completed=False,
+        motion_phase=current_motion_phase,
     )
 
     if request_id is not None:
@@ -1725,12 +1908,9 @@ def tick_execution() -> None:
     """
     執行一個 generator step。
 
-    一般階段：
-        2 秒到達後立即暫停。
-
-    夾爪閉合階段：
-        即使超過 2 秒，也繼續執行到 GRIPPER_CLOSED_BOUNDARY，
-        然後立即暫停，不會開始抬升。
+    一般階段：2 秒到達後立即暫停。
+    夾爪閉合階段：時間到達後仍完成閉合，再停在
+    GRIPPER_CLOSED_BOUNDARY，不會直接開始抬升。
     """
     global execution_steps_remaining
     global slice_time_expired
@@ -1758,7 +1938,6 @@ def tick_execution() -> None:
         if not slice_time_expired:
             return
 
-        # 時間已到，但正在閉合：允許閉合階段完整跑完。
         if phase == "GRIPPER_CLOSING":
             debug(
                 "[EXECUTION] Time expired during gripper closing; "
@@ -1766,8 +1945,6 @@ def tick_execution() -> None:
             )
             return
 
-        # close_gripper() 額外產生此邊界，確保閉合完成後
-        # 暫停於此，不會在同一個 next() 中直接開始抬升。
         if phase == "GRIPPER_CLOSED_BOUNDARY":
             log(
                 "[EXECUTION] Gripper closing completed after time limit; "
@@ -1776,7 +1953,6 @@ def tick_execution() -> None:
             finish_paused()
             return
 
-        # 其他任何階段在時間到達後照常暫停。
         log(
             f"[EXECUTION] Paused after "
             f"{ACTION_SLICE_SECONDS:.1f} simulated seconds, "
@@ -1793,38 +1969,46 @@ def tick_execution() -> None:
 
 
 try:
-    log("=" * 76)
-    log("Isaac Sim Manual Record Server — 2 Second Action Slices")
+    log("=" * 80)
+    log("Isaac Sim Manual Record Server — Dynamic Task Instructions")
+    log("Instruction policy  : any non-empty natural-language string")
     log(
-        "Allowed instructions: "
-        f"{list(TASK_INSTRUCTIONS.values())}"
+        "Destinations       : "
+        f"{sorted(DESTINATION_CONFIGS.keys())}"
     )
-    log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
-    log("Close behavior    : finish gripper closing even after time limit")
-    log("Home behavior     : run directly until completion")
-    log("Clear behavior    : reset scene; do not record JSONL")
-    log(f"Tray place pos    : {TRAY_PLACE_POS}")
-    log(f"Box place pos     : {BOX_PLACE_POS}")
-    log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
-    log(f"Gripper close pos : {GRIPPER_CLOSED_POSITIONS}")
-    log("Grip hold         : CLOSED target maintained during pause/lift/move")
-    log(f"Lift offset       : {LIFT_OFFSET}")
-    log(f"Lift frames       : {LIFT_FRAMES}")
-    log(f"Image directory  : {SAVE_DIR}")
-    log(f"JSONL file       : {JSONL_PATH}")
-    log("=" * 76)
+    log(
+        f"Default destination: {DEFAULT_DESTINATION!r}"
+    )
+    log(
+        f"Action slice       : {ACTION_SLICE_SECONDS:.1f} "
+        "simulated seconds"
+    )
+    log("Close behavior     : finish gripper closing after time limit")
+    log("Home behavior      : run directly until completion")
+    log("Clear behavior     : reset scene; do not record JSONL")
+
+    for name in sorted(DESTINATION_CONFIGS):
+        try:
+            position = get_destination_position(name)
+            log(f"Destination {name:<5}: {position}")
+        except Exception as exc:
+            log(f"Destination {name:<5}: CONFIG ERROR — {exc}")
+
+    log(f"Gripper open pos   : {GRIPPER_OPEN_POSITIONS}")
+    log(f"Gripper close pos  : {GRIPPER_CLOSED_POSITIONS}")
+    log("Grip hold          : maintain target during pause/lift/move")
+    log(f"Lift offset        : {LIFT_OFFSET}")
+    log(f"Lift frames        : {LIFT_FRAMES}")
+    log(f"Image directory    : {SAVE_DIR}")
+    log(f"JSONL file         : {JSONL_PATH}")
+    log("=" * 80)
 
     while simulation_app.is_running():
         accept_client_if_idle()
         read_single_request_if_available()
 
-        # 先更新本幀的手臂與夾爪控制命令。
         tick_execution()
-
-        # 不論 generator 是否暫停，夾爪都持續維持目標。
         maintain_gripper_target()
-
-        # 套用本幀控制命令並推進物理模擬。
         world.step(render=True)
 
 except KeyboardInterrupt:
