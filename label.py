@@ -20,6 +20,7 @@ Isaac Sim 外部人工標註控制端。
     putdown tray
     putdown box
     finished
+    clear
     home
     retry
     help
@@ -121,6 +122,9 @@ def normalize_manual_label(raw_text: str) -> str:
 
         return f"putdown {requested_destination}"
 
+    if lower == "clear":
+        return "clear"
+
     if lower == "home":
         return "home"
 
@@ -137,7 +141,7 @@ def normalize_manual_label(raw_text: str) -> str:
 
     raise ValueError(
         "不支援的指令。請輸入 pickup <物品名稱>、putdown tray、"
-        "putdown box、finished 或 home。"
+        "putdown box、finished、clear 或 home。"
     )
 
 
@@ -227,6 +231,7 @@ def print_help() -> None:
         f"  putdown                            預設放到 {TASK_DESTINATION}\n"
         f"  putdown {TASK_DESTINATION:<25} 記錄資料並放到目前目的地\n"
         "  finished                           結束任務並記錄完整完成標註\n"
+        "  clear                              將場景恢復為 USD 初始狀態，不記錄資料\n"
         "  home                               記錄資料，直接執行到 Home 完成\n"
         "  retry                              重送相同 request_id\n"
         "  help                               顯示說明\n"
@@ -352,7 +357,9 @@ def main() -> int:
                 instruction=TASK_INSTRUCTION,
             )
             last_payload = payload
-            last_action_label = action_label
+
+            if action_label != "clear":
+                last_action_label = action_label
 
         print(
             f"\n[SEND] request_id={payload.request_id}, "
@@ -397,4 +404,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
