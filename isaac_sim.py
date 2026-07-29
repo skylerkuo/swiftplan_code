@@ -26,10 +26,14 @@ Isaac Sim 人工標註與 Franka 控制 Server。
    - 先記錄一筆資料。
    - 不受 2 秒限制，直接執行到完成。
 5. finished：
-   - 記錄 "tidy up the properties finished"。
+   - 記錄完整 finished 標註。
    - 取消目前動作並保持手臂目前姿態。
    - 不執行其他機械手臂動作。
-6. 每個 TCP 連線只處理一筆 JSON 指令，回覆後立即關閉。
+6. clear：
+   - 不拍照、不寫入 JSONL。
+   - 取消目前尚未完成的動作。
+   - 執行 World reset，恢復 USD 載入時的初始場景狀態。
+7. 每個 TCP 連線只處理一筆 JSON 指令，回覆後立即關閉。
 """
 
 from __future__ import annotations
@@ -125,7 +129,7 @@ BOX_PLACE_POS = np.array(
 )
 
 APPROACH_HEIGHT = 0.10
-GRASP_Z_OFFSET = 0.01
+GRASP_Z_OFFSET = 0.014
 # 抓取後先垂直抬升，避免水平分量使物體從指間滑落。
 LIFT_OFFSET = np.array([0.0, 0.0, 0.12])
 LIFT_FRAMES = 150
@@ -147,6 +151,7 @@ GRIPPER_OPEN_FRAMES = 30
 HOME_FRAMES = 30
 CAMERA_WARMUP_FRAMES = 30
 CAPTURE_SETTLE_FRAMES = 3
+CLEAR_WARMUP_FRAMES = 10
 
 COMPLETED_REQUEST_CACHE_SIZE = 200
 DEBUG = True
@@ -447,6 +452,9 @@ def parse_action_label(
 
         return f"putdown_{requested_destination}", None
 
+    if lower == "clear":
+        return "clear", None
+
     if lower == "home":
         return "home", None
 
@@ -460,7 +468,7 @@ def parse_action_label(
 
     raise ValueError(
         "不支援的 action_label。只接受 pickup <物品名稱>、"
-        f"putdown {task_destination}、finished 或 home。"
+        f"putdown {task_destination}、finished、clear 或 home。"
     )
 
 
@@ -1059,6 +1067,48 @@ def cancel_active_action() -> None:
     hold_current_pose()
 
 
+
+def reset_scene_to_usd_state() -> None:
+    """
+    將場景恢復為目前 USD 載入時的初始狀態。
+
+    world.reset() 會重新初始化物理模擬與已註冊的 Scene 物件，
+    因此 Franka、剛體物件及其速度會回到模擬開始時的狀態。
+    """
+    global current_target_name
+    global last_picked_target_name
+    global desired_gripper_positions
+    global current_motion_phase
+
+    log("[CLEAR] Resetting scene to the USD initial state.")
+
+    # 直接丟棄尚未完成的 generator；不要先 Hold，因為接著要完整 Reset。
+    clear_active_action()
+    clear_execution_state()
+
+    current_target_name = None
+    last_picked_target_name = None
+    current_motion_phase = "IDLE"
+
+    # 避免 Reset 後主迴圈仍持續送出先前的閉合目標。
+    desired_gripper_positions = GRIPPER_OPEN_POSITIONS.copy()
+
+    # 重新初始化模擬，恢復 USD 所定義的初始姿態。
+    world.reset()
+
+    # Reset 後重新初始化相機與控制器狀態。
+    camera.initialize()
+    rmpflow_controller.reset()
+
+    set_desired_gripper_positions(GRIPPER_OPEN_POSITIONS)
+
+    for _ in range(CLEAR_WARMUP_FRAMES):
+        maintain_gripper_target()
+        world.step(render=True)
+
+    log("[CLEAR] Scene reset completed.")
+
+
 # =========================
 # Request execution
 # =========================
@@ -1156,6 +1206,52 @@ def start_request(request: Dict[str, Any]) -> None:
         f"instruction={task_instruction!r} | "
         f"action_label={action_label!r}"
     )
+
+    # clear 是場景控制指令，不拍照，也不寫入 JSONL。
+    if command == "clear":
+        try:
+            reset_scene_to_usd_state()
+
+        except Exception as exc:
+            log_exception("[CLEAR] Scene reset failed", exc)
+
+            reply = make_reply(
+                request_id,
+                "ERROR",
+                execution_state="CLEAR_FAILED",
+                command=command,
+                action_label=action_label,
+                instruction=task_instruction,
+                message=(
+                    "場景恢復失敗："
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                recorded=False,
+                motion_executed=False,
+                action_completed=False,
+            )
+
+            cache_completed_reply(request_id, reply)
+            send_reply_and_close(reply)
+            return
+
+        reply = make_reply(
+            request_id,
+            "SUCCESS",
+            execution_state="CLEAR_COMPLETED",
+            command=command,
+            action_label=action_label,
+            instruction=task_instruction,
+            recorded=False,
+            image_path=None,
+            motion_executed=True,
+            action_completed=True,
+            scene_reset=True,
+        )
+
+        cache_completed_reply(request_id, reply)
+        send_reply_and_close(reply)
+        return
 
     # pickup 先驗證物品存在，避免錯誤物品名稱被寫入資料集。
     if command == "pickup":
@@ -1706,6 +1802,7 @@ try:
     log(f"Action slice      : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
     log("Close behavior    : finish gripper closing even after time limit")
     log("Home behavior     : run directly until completion")
+    log("Clear behavior    : reset scene; do not record JSONL")
     log(f"Tray place pos    : {TRAY_PLACE_POS}")
     log(f"Box place pos     : {BOX_PLACE_POS}")
     log(f"Gripper open pos  : {GRIPPER_OPEN_POSITIONS}")
