@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """
-manual_command_client_dynamic.py
+manual_command_client_fixed_task_1s.py
 
-Isaac Sim 外部人工標註控制端（動態任務指令版本）。
+Isaac Sim 外部人工標註控制端：固定任務、每次推進 1 秒。
 
-設計目標：
-1. 任務 instruction 不再綁定單一固定句型，可在執行期間切換，例如：
-       put the apple into the tray
-       put the cube into the box
-       tidy up the properties into the tray
-       prepare the fruits
-2. 目前控制技能仍保留：
-       pickup <物品名稱>
-       putdown tray
-       putdown box
-       finished
-       clear
-       home
-3. putdown 可省略目的地，使用目前設定的預設目的地。
-4. 每一筆新動作建立新的 request_id；retry 會沿用上一筆 request_id。
-5. 直接按 Enter 會重複上一個 action label，但建立新的 request_id。
+使用方式：
+1. 先在下方 Config 區修改 TASK_INSTRUCTION 與 TASK_DESTINATION。
+2. 啟動 Server。
+3. 執行本 Client 後，直接輸入高階動作標註。
+4. 每送出一筆 pickup / putdown：
+   - Server 先拍攝目前畫面並寫入一筆 JSONL。
+   - 再執行或續跑該高階動作 1 秒模擬時間。
+5. 直接按 Enter 會重複上一個 action label，建立新的 request_id，
+   因此可連續收集同一高階動作每隔 1 秒的狀態資料。
 
-建議操作流程：
-    task put the apple into the box
-    dest box
-    pickup apple
-    <直接按 Enter，續跑 pickup>
+保留指令：
+    pickup <物品名稱>
+    putdown
+    putdown tray
     putdown box
-    <直接按 Enter，續跑 putdown box>
     finished
     clear
+    home
+    retry
+    show
+    help
+    quit
+
+注意：
+- TASK_DESTINATION 只決定簡寫 `putdown` 的預設目的地。
+- 明確輸入 `putdown tray` 或 `putdown box` 仍然都可使用。
+- `clear` 不拍照、不寫入 JSONL。
+- `home` 會先記錄一筆資料，再直接執行到完成。
+- `finished` 只記錄完成標註，不執行機械手臂動作。
 """
 
 from __future__ import annotations
 
 import json
-import re
 import socket
 import sys
 import uuid
@@ -44,7 +46,7 @@ from typing import Any, Dict, Optional, Tuple
 
 
 # =========================
-# Config
+# Config：每次收集不同任務時，只需修改這裡
 # =========================
 
 HOST = "127.0.0.1"
@@ -54,19 +56,52 @@ CONNECT_TIMEOUT_SECONDS = 10.0
 REPLY_TIMEOUT_SECONDS = 300.0
 MAX_REPLY_BYTES = 1024 * 1024
 
+# 這一輪資料收集要使用的自然語言任務指令。
+# 範例：
+#   "put the apple into the tray"
+#   "put the cube into the box"
+#   "tidy up the properties into the tray"
+#   "tidy up the fruits into the box"
+TASK_INSTRUCTION = "put the apple into the box"
+
+# 輸入簡寫 `putdown` 時使用的預設目的地。
+# 目前支援 "tray" 與 "box"。
+TASK_DESTINATION = "box"
+
 SUPPORTED_DESTINATIONS: Tuple[str, ...] = ("tray", "box")
-
-DEFAULT_TASK_INSTRUCTION = "tidy up the properties into the tray"
-DEFAULT_TASK_DESTINATION = "tray"
-
-if DEFAULT_TASK_DESTINATION not in SUPPORTED_DESTINATIONS:
-    raise ValueError(
-        "DEFAULT_TASK_DESTINATION 必須存在於 SUPPORTED_DESTINATIONS。"
-    )
+ACTION_SLICE_SECONDS = 1.0
 
 
 # =========================
-# Data models
+# Config validation
+# =========================
+
+def validate_config() -> None:
+    instruction = str(TASK_INSTRUCTION).strip()
+    destination = str(TASK_DESTINATION).strip().lower()
+
+    if not instruction:
+        raise ValueError("TASK_INSTRUCTION 不可為空。")
+
+    if len(instruction) > 1000:
+        raise ValueError("TASK_INSTRUCTION 最多 1000 個字元。")
+
+    if destination not in SUPPORTED_DESTINATIONS:
+        allowed = "、".join(SUPPORTED_DESTINATIONS)
+        raise ValueError(
+            f"TASK_DESTINATION={destination!r} 不支援；目前只支援：{allowed}。"
+        )
+
+
+validate_config()
+
+FIXED_TASK_INSTRUCTION = str(TASK_INSTRUCTION).strip()
+FIXED_TASK_DESTINATION = str(TASK_DESTINATION).strip().lower()
+FINISHED_LABEL = f"{FIXED_TASK_INSTRUCTION} finished"
+
+
+# =========================
+# Request payload
 # =========================
 
 @dataclass(frozen=True)
@@ -85,34 +120,9 @@ class RequestPayload:
         }
 
 
-@dataclass
-class TaskContext:
-    instruction: str = DEFAULT_TASK_INSTRUCTION
-    default_destination: str = DEFAULT_TASK_DESTINATION
-
-    def validate(self) -> None:
-        self.instruction = normalize_instruction(self.instruction)
-        self.default_destination = normalize_destination(
-            self.default_destination
-        )
-
-
 # =========================
-# Task and action normalization
+# Input normalization
 # =========================
-
-def normalize_instruction(raw_text: str) -> str:
-    """驗證自然語言任務指令；不限制固定句型。"""
-    text = str(raw_text).strip()
-
-    if not text:
-        raise ValueError("任務 instruction 不可為空。")
-
-    if len(text) > 1000:
-        raise ValueError("任務 instruction 過長，最多 1000 個字元。")
-
-    return text
-
 
 def normalize_destination(raw_text: str) -> str:
     destination = str(raw_text).strip().lower()
@@ -126,37 +136,11 @@ def normalize_destination(raw_text: str) -> str:
     return destination
 
 
-def infer_destination_from_instruction(
-    instruction: str,
-) -> Optional[str]:
-    """
-    若 instruction 中只出現一個已支援目的地，就回傳該目的地。
-
-    這只是 Client 端便利功能；Server 仍會接收明確的
-    default_destination，因此不依賴自然語言解析來控制機器人。
-    """
-    lower = instruction.lower()
-    matches = []
-
-    for destination in SUPPORTED_DESTINATIONS:
-        if re.search(rf"\b{re.escape(destination)}\b", lower):
-            matches.append(destination)
-
-    if len(matches) == 1:
-        return matches[0]
-
-    return None
-
-
-def normalize_manual_label(
-    raw_text: str,
-    current_destination: str,
-) -> str:
+def normalize_manual_label(raw_text: str) -> str:
     """
     驗證並正規化人工輸入。
 
-    回傳值會傳給 Server；Server 會再次驗證並將 canonical action label
-    寫入 JSONL。
+    回傳值會送往 Server，並成為 JSONL 中的 annotation.action_label。
     """
     text = str(raw_text).strip()
     lower = text.lower()
@@ -164,12 +148,11 @@ def normalize_manual_label(
     if not text:
         raise ValueError("動作指令不可為空。")
 
-    if lower == "finished":
+    if lower == "finished" or lower == FINISHED_LABEL.lower():
         return "finished"
 
     if lower == "putdown":
-        destination = normalize_destination(current_destination)
-        return f"putdown {destination}"
+        return f"putdown {FIXED_TASK_DESTINATION}"
 
     if lower.startswith("putdown"):
         parts = text.split(maxsplit=1)
@@ -259,7 +242,7 @@ def receive_one_json_line(sock: socket.socket) -> Dict[str, Any]:
 
 
 def send_request_once(payload: RequestPayload) -> Dict[str, Any]:
-    """建立一次連線、傳送一筆 JSON、接收一筆 JSON，然後關閉。"""
+    """建立一次 TCP 連線，只傳送一筆 JSON 指令。"""
     request_line = json.dumps(
         payload.to_dict(),
         ensure_ascii=False,
@@ -280,67 +263,30 @@ def send_request_once(payload: RequestPayload) -> Dict[str, Any]:
 # Console UI
 # =========================
 
-def print_task_context(context: TaskContext) -> None:
-    print("\n[CURRENT TASK]")
-    print(f"  instruction         : {context.instruction}")
-    print(f"  default destination : {context.default_destination}")
+def print_fixed_task() -> None:
+    print("\n[FIXED TASK]")
+    print(f"  instruction         : {FIXED_TASK_INSTRUCTION}")
+    print(f"  default destination : {FIXED_TASK_DESTINATION}")
+    print(f"  action slice        : {ACTION_SLICE_SECONDS:.1f} simulated second")
 
 
-def print_examples() -> None:
+def print_help() -> None:
     print(
-        "\n操作範例：\n"
-        "\n"
-        "範例 1：單一物件放入 tray\n"
-        "  task put the apple into the tray\n"
-        "  dest tray\n"
-        "  pickup apple\n"
-        "  <Enter，直到 pickup 完成>\n"
-        "  putdown tray\n"
-        "  <Enter，直到 putdown 完成>\n"
-        "  finished\n"
-        "\n"
-        "範例 2：單一物件放入 box\n"
-        "  task put the cube into the box\n"
-        "  dest box\n"
-        "  pickup cube\n"
-        "  putdown box\n"
-        "  finished\n"
-        "\n"
-        "範例 3：多物件整理\n"
-        "  task tidy up the properties into the box\n"
-        "  dest box\n"
-        "  pickup bottle\n"
-        "  putdown box\n"
-        "  pickup cube\n"
-        "  putdown box\n"
-        "  finished\n"
-    )
-
-
-def print_help(context: TaskContext) -> None:
-    print(
-        "\n任務設定指令：\n"
-        "  task <自然語言任務>              設定目前任務 instruction\n"
-        "  dest <tray|box>                  設定 putdown 的預設目的地\n"
-        "  show                             顯示目前任務設定\n"
-        "  examples                         顯示操作範例\n"
-        "\n"
-        "機器人與標註指令：\n"
-        "  pickup <物品名稱>                執行或續跑 pickup 2 秒\n"
-        f"  putdown                           放到目前預設目的地 "
-        f"({context.default_destination})\n"
-        "  putdown tray                     明確放到 tray\n"
-        "  putdown box                      明確放到 box\n"
-        "  finished                          記錄完整任務完成標註\n"
-        "  clear                             重設場景，不寫入 JSONL\n"
-        "  home                              記錄資料並直接回 Home\n"
-        "  retry                             重送上一筆相同 request_id\n"
-        "  help                              顯示說明\n"
-        "  quit                              結束程式\n"
-        "\n"
-        "快捷操作：\n"
-        "  直接按 Enter                     重複上一個 action label，"
-        "但建立新的 request_id\n"
+        "\n可用指令：\n"
+        "  pickup <物品名稱>                記錄目前畫面，執行或續跑 pickup 1 秒\n"
+        f"  putdown                           預設放到 {FIXED_TASK_DESTINATION}\n"
+        "  putdown tray                     記錄目前畫面，放到 tray 1 秒\n"
+        "  putdown box                      記錄目前畫面，放到 box 1 秒\n"
+        "  finished                         記錄完整任務完成標註\n"
+        "  clear                            重設場景，不拍照、不寫入 JSONL\n"
+        "  home                             記錄目前畫面，直接執行到 Home 完成\n"
+        "  retry                            重送上一筆相同 request_id\n"
+        "  show                             顯示程式中固定的任務設定\n"
+        "  help                             顯示說明\n"
+        "  quit                             結束程式\n"
+        "\n快捷操作：\n"
+        "  直接按 Enter                    重複上一個 action label，"
+        "建立新 request_id，收集下一個 1 秒狀態\n"
     )
 
 
@@ -369,15 +315,15 @@ def print_reply(reply: Dict[str, Any]) -> None:
     print(f"✅ request_id={request_id}")
 
     if recorded:
-        print(f"✅ 已記錄資料：{image_path}")
+        print(f"✅ 已記錄一筆資料：{image_path}")
 
     if execution_state == "PAUSED":
         if reply.get("continued"):
-            print("⏸️ 相同動作已續跑，目前暫停。")
+            print("⏸️ 相同動作已續跑 1 秒，目前暫停。")
         elif reply.get("switched"):
-            print("⏸️ 已切換新動作並執行，目前暫停。")
+            print("⏸️ 已切換新動作並執行 1 秒，目前暫停。")
         else:
-            print("⏸️ 動作已執行一個時間片，目前暫停。")
+            print("⏸️ 動作已執行 1 秒，目前暫停。")
 
     elif execution_state == "COMPLETED":
         print("🏁 此高階動作已完成。")
@@ -398,82 +344,18 @@ def print_reply(reply: Dict[str, Any]) -> None:
         print(f"ℹ️ execution_state={execution_state}")
 
 
-def handle_task_command(
-    raw_command: str,
-    context: TaskContext,
-) -> bool:
-    """
-    處理不會送往 Server 的本地任務設定指令。
-
-    回傳 True 表示已處理；False 表示這是機器人動作指令。
-    """
-    stripped = raw_command.strip()
-    lower = stripped.lower()
-
-    if lower == "show":
-        print_task_context(context)
-        return True
-
-    if lower == "examples":
-        print_examples()
-        return True
-
-    if lower == "task":
-        print_task_context(context)
-        print("使用方式：task <自然語言任務>")
-        return True
-
-    if lower.startswith("task "):
-        instruction = normalize_instruction(stripped[5:])
-        context.instruction = instruction
-
-        inferred = infer_destination_from_instruction(instruction)
-        if inferred is not None:
-            context.default_destination = inferred
-            print(
-                f"✅ 已設定 instruction，並從句子推定預設目的地為 "
-                f"{inferred}。"
-            )
-        else:
-            print("✅ 已設定 instruction。")
-
-        print_task_context(context)
-        return True
-
-    if lower in {"dest", "destination"}:
-        print_task_context(context)
-        print("使用方式：dest tray 或 dest box")
-        return True
-
-    if lower.startswith("dest "):
-        destination = normalize_destination(stripped[5:])
-        context.default_destination = destination
-        print(f"✅ 預設目的地已設為 {destination}。")
-        return True
-
-    if lower.startswith("destination "):
-        destination = normalize_destination(stripped[12:])
-        context.default_destination = destination
-        print(f"✅ 預設目的地已設為 {destination}。")
-        return True
-
-    return False
-
-
 def main() -> int:
-    context = TaskContext()
-    context.validate()
-
     print("=" * 76)
-    print("Isaac Sim Manual Annotation Client — Dynamic Task Instructions")
+    print("Isaac Sim Manual Annotation Client — Fixed Task / 1 Second")
     print(f"Server                  : {HOST}:{PORT}")
-    print(f"Initial instruction     : {context.instruction}")
-    print(f"Initial destination     : {context.default_destination}")
-    print("Action slice            : 2 simulated seconds")
+    print(f"Task instruction        : {FIXED_TASK_INSTRUCTION}")
+    print(f"Default destination     : {FIXED_TASK_DESTINATION}")
+    print(f"Action slice            : {ACTION_SLICE_SECONDS:.1f} simulated second")
     print("Supported destinations  : tray, box")
-    print("Instruction syntax      : arbitrary non-empty natural language")
+    print("Task changes             : edit TASK_INSTRUCTION in this file")
+    print("Destination changes      : edit TASK_DESTINATION in this file")
     print("=" * 76)
-    print_help(context)
+    print_help()
 
     last_payload: Optional[RequestPayload] = None
     last_action_label: Optional[str] = None
@@ -493,17 +375,11 @@ def main() -> int:
             return 0
 
         if lower in {"help", "h", "?"}:
-            print_help(context)
+            print_help()
             continue
 
-        try:
-            if stripped and handle_task_command(stripped, context):
-                # 任務條件改變後，不直接沿用上一個 action label，避免誤標。
-                if lower.startswith(("task ", "dest ", "destination ")):
-                    last_action_label = None
-                continue
-        except ValueError as exc:
-            print(f"⚠️ {exc}")
+        if lower == "show":
+            print_fixed_task()
             continue
 
         if lower == "retry":
@@ -525,25 +401,16 @@ def main() -> int:
 
             else:
                 try:
-                    action_label = normalize_manual_label(
-                        stripped,
-                        context.default_destination,
-                    )
+                    action_label = normalize_manual_label(stripped)
                 except ValueError as exc:
                     print(f"⚠️ {exc}")
                     continue
 
-            try:
-                context.validate()
-            except ValueError as exc:
-                print(f"⚠️ 任務設定無效：{exc}")
-                continue
-
             payload = RequestPayload(
                 request_id=uuid.uuid4().hex,
                 action_label=action_label,
-                instruction=context.instruction,
-                default_destination=context.default_destination,
+                instruction=FIXED_TASK_INSTRUCTION,
+                default_destination=FIXED_TASK_DESTINATION,
             )
             last_payload = payload
 
