@@ -1,50 +1,46 @@
 #!/usr/bin/env python3
 """
-isaac_manual_record_server_dynamic.py
+isaac_manual_record_server_fixed_task_1s.py
 
-Isaac Sim 人工標註與 Franka 控制 Server（動態任務指令版本）。
+Isaac Sim 人工標註與 Franka 控制 Server。
 
-主要改動：
-1. instruction 不再限制為固定白名單，只要是非空字串即可，例如：
-       put the apple into the tray
-       put the cube into the box
-       tidy up the properties into the tray
-       prepare the fruits
-2. 目前機器人控制技能保留：
+本版本配合 fixed-task Client 使用：
+1. 自然語言任務在 Client 的 TASK_INSTRUCTION 常數中預先設定，
+   執行 Client 後不需要再輸入 task 或 destination 設定。
+2. 每送出一筆 pickup / putdown 指令：
+   - 先拍攝目前影像並寫入一筆 JSONL。
+   - 再執行或續跑該高階動作 1 秒模擬時間。
+   - 相同動作下一次送入時，從原 generator 暫停位置繼續。
+3. 支援：
        pickup <物品名稱>
+       putdown
        putdown tray
        putdown box
        finished
        clear
        home
-3. putdown 可只傳 "putdown"，Server 會使用 request 中的
-   default_destination；若未提供，會嘗試從 instruction 推定 tray/box，
-   最後才使用 DEFAULT_DESTINATION。
-4. JSONL 格式維持不變：
-       {
-           "image_path": "...png",
-           "instruction": "put the apple into the box",
-           "annotation": {
-               "action_label": "pickup apple"
-           }
-       }
-5. finished 仍寫成完整標註：
-       "<instruction> finished"
-6. pickup / putdown 每次最多執行 2 秒模擬時間：
-   - 相同 instruction 與相同動作：從原 generator 暫停位置繼續。
-   - instruction、目標物或目的地不同：取消舊 generator，建立新動作。
-   - 若時間到達時正在閉合夾爪，會完成閉合後再暫停。
-7. home 不受 2 秒限制，直接執行到完成。
-8. clear 不拍照、不寫入 JSONL，直接重設場景。
-9. 每個 TCP 連線只處理一筆 JSON 指令。
+4. `putdown` 使用 request 中的 default_destination；
+   `putdown tray` 與 `putdown box` 可明確指定目的地。
+5. 若 1 秒到達時正在閉合夾爪，會繼續完成閉合階段後再暫停，
+   避免夾爪停在不穩定的半閉合狀態。
+6. home 先記錄一筆資料，再不受時間片限制直接執行到完成。
+7. finished 只記錄完整完成標註，不執行機械手臂動作。
+8. clear 不拍照、不寫入 JSONL，直接恢復 USD 初始場景。
+9. retry 沿用相同 request_id 時，不會重複記錄或重複執行。
 
-Request 範例：
+JSONL 格式：
     {
-        "request_id": "abc123",
-        "instruction": "put the cube into the box",
-        "default_destination": "box",
-        "action_label": "pickup cube"
+        "image_path": "...png",
+        "instruction": "put the apple into the box",
+        "annotation": {
+            "action_label": "pickup apple"
+        }
     }
+
+重要：
+- 每一筆 request 對應一筆資料。
+- 連續按 Enter 重複同一動作時，每筆資料之間會推進約 1 秒模擬時間。
+- 夾爪閉合邊界可能因完成閉合而略超過 1 秒。
 """
 
 from __future__ import annotations
@@ -96,15 +92,17 @@ SAVE_DIR = DATA_ROOT / "captured_images"
 JSONL_PATH = DATA_ROOT / "data_gradu.jsonl"
 USD_PATH = str(DATA_ROOT / "graduation.usd")
 
-DEFAULT_TASK_INSTRUCTION = "tidy up the properties into the tray"
-DEFAULT_DESTINATION = "tray"
+# Client 正常會在每一筆 request 傳入固定 TASK_INSTRUCTION。
+# 以下只在 request 未提供欄位時作為 Server fallback；一般只需修改 Client。
+DEFAULT_TASK_INSTRUCTION = "put the apple into the box"
+DEFAULT_DESTINATION = "box"
 
 CAMERA_PRIM_PATH = "/World/Camera"
 FRANKA_PRIM_PATH = "/World/Franka"
 CAMERA_RESOLUTION = (640, 480)
 
-# 與原始程式註解一致，設定為 2 秒模擬時間。
-ACTION_SLICE_SECONDS = 2.0
+# 每一筆人工標註推進 1 秒模擬時間。
+ACTION_SLICE_SECONDS = 1.0
 DEFAULT_PHYSICS_DT = 1.0 / 60.0
 
 # 物品別名與 USD Prim path。
@@ -1908,7 +1906,7 @@ def tick_execution() -> None:
     """
     執行一個 generator step。
 
-    一般階段：2 秒到達後立即暫停。
+    一般階段：1 秒到達後立即暫停。
     夾爪閉合階段：時間到達後仍完成閉合，再停在
     GRIPPER_CLOSED_BOUNDARY，不會直接開始抬升。
     """
@@ -1970,8 +1968,8 @@ def tick_execution() -> None:
 
 try:
     log("=" * 80)
-    log("Isaac Sim Manual Record Server — Dynamic Task Instructions")
-    log("Instruction policy  : any non-empty natural-language string")
+    log("Isaac Sim Manual Record Server — Fixed Task / 1 Second")
+    log("Instruction source  : fixed TASK_INSTRUCTION sent by Client")
     log(
         "Destinations       : "
         f"{sorted(DESTINATION_CONFIGS.keys())}"
