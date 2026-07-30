@@ -17,6 +17,7 @@ isaac_manual_record_server_three_step_1s.py
 資料收集：
 - 每一筆新動作先拍照並寫入 JSONL，再執行或續跑 1 秒。
 - 相同動作再次送入時，從 generator 暫停位置續跑。
+- 不檢查 pick 或 up 是否已完成；不同指令一到就取消目前 generator 並立即切換。
 - 關閉或開啟夾爪時，不會停在半開或半閉狀態。
 - clear 不記錄；finished 只記錄；home 直接執行到完成。
 """
@@ -792,34 +793,42 @@ def reset_scene_to_usd_state() -> None:
         world.step(render=True)
 
 
-def validate_workflow_before_record(
+def validate_command_resources_before_record(
     command: str,
     parsed_target_name: Optional[str],
     destination_name: Optional[str],
 ) -> None:
+    """
+    只檢查執行命令不可缺少的基本資料，不檢查上一個動作是否完成。
+
+    允許的人工切換範例：
+    - pick 尚未完成時直接輸入 up：
+      取消 pick generator，立即往先前記錄的抬升位置移動。
+    - up 尚未完成時直接輸入 putdown box：
+      取消 up generator，立即往 box 移動並在到達後開爪。
+
+    唯一保留的限制：
+    - pick 的物品 Prim 必須存在。
+    - up 必須曾經收到過 pick，否則沒有「原物品上方位置」可使用。
+    - putdown 的目的地設定必須存在。
+    """
     if command == "pick":
         assert parsed_target_name is not None
         find_target_prim_path(parsed_target_name)
         return
 
     if command == "up":
-        if current_target_name is None or target_lift_position is None:
-            raise ValueError("尚未選定物品。請先完成 pick <物品名稱>。")
-        if not pick_completed:
+        if target_lift_position is None:
             raise ValueError(
-                "pick 尚未完成。請繼續輸入相同 pick 指令，"
-                "直到 execution_state=COMPLETED，再輸入 up。"
+                "目前沒有可供 up 使用的物品位置。"
+                "至少需要先送出一次 pick <物品名稱>，"
+                "不要求 pick 已完成。"
             )
         return
 
     if command == "putdown":
         assert destination_name is not None
         get_destination_position(destination_name)
-        if held_target_name is None or not up_completed:
-            raise ValueError(
-                "物品尚未完成 up。請依序完成 pick <物品名稱>、up，"
-                "再輸入 putdown tray 或 putdown box。"
-            )
 
 
 def prepare_new_pick(target_name: str) -> Generator[str, None, None]:
@@ -969,7 +978,7 @@ def start_request(request: Dict[str, Any]) -> None:
 
     if command in {"pick", "up", "putdown"}:
         try:
-            validate_workflow_before_record(
+            validate_command_resources_before_record(
                 command,
                 parsed_target_name,
                 destination_name,
@@ -1349,6 +1358,7 @@ try:
     log("=" * 80)
     log("Isaac Sim Manual Record Server — Three-Step Flow / 1 Second")
     log("Action flow         : pick <object> -> up -> putdown <destination>")
+    log("Workflow guard      : disabled; user decides when to switch actions")
     log(f"Action slice        : {ACTION_SLICE_SECONDS:.1f} simulated seconds")
     log(f"Gripper open frames : {GRIPPER_OPEN_FRAMES} (faster)")
     log(f"Gripper close frames: {GRIPPER_CLOSE_FRAMES} (unchanged)")
